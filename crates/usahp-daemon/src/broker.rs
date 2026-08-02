@@ -61,6 +61,10 @@ async fn run(mut receiver: mpsc::Receiver<BrokerCommand>, mappings: Vec<Mapping>
                         monotonic_us: started.elapsed().as_micros().min(u64::MAX as u128) as u64,
                         switch_id: transition.switch_id,
                         action: transition.action,
+                        confidence: match transition.action {
+                            Action::Pressed => 100.0,
+                            Action::Released => 0.0,
+                        },
                     }));
                     clients.retain(|client_id, sender| match sender.try_send(message.clone()) {
                         Ok(()) => true,
@@ -149,6 +153,13 @@ mod tests {
                     panic!("expected event")
                 };
                 assert_eq!(event.sequence, expected);
+                // Binary switches emit 100.0 on press (seq 1) and 0.0 on release (seq 2).
+                let expected_confidence: f32 = if expected == 1 { 100.0 } else { 0.0 };
+                assert!(
+                    (event.confidence - expected_confidence).abs() <= f32::EPSILON,
+                    "confidence was {}",
+                    event.confidence
+                );
             }
         }
     }

@@ -39,15 +39,19 @@ Switches are ordered lexicographically by `switch_id`. A client connecting while
   "sequence": 42,
   "monotonic_us": 1843201,
   "switch_id": "switch_1",
-  "action": "pressed"
+  "action": "pressed",
+  "confidence": 100.0
 }
 ```
 
 - `sequence` begins at 1 and increases globally for every emitted logical transition during one daemon process.
 - `monotonic_us` is elapsed microseconds since daemon startup. It supports ordering and duration measurement but is not a wall-clock timestamp.
 - `action` is exactly `pressed` or `released`.
+- `confidence` is an analog activation score in the range `0.0`–`100.0`. For binary switches the daemon emits `100.0` on `pressed` and `0.0` on `released`. Analog sources (BCI, facial-gesture, pressure) stream a raw probability instead, so clients can apply their own activation thresholding. The field is optional on the wire (`serde(default)`): older servers omit it, and clients should treat a missing value as `0.0`.
 - Duplicate physical edges are ignored and not assigned sequence numbers.
 - With many-to-one mappings, only the first press and final release produce logical events.
+
+> **Forward-compatible addition.** `confidence` was added to protocol 0.1 as an optional, additive field. It does not change the version tag and is safe to ignore. The broker in this release fills binary values only; streaming real analog confidence end-to-end (from capture through the state machine) is future work.
 
 ## Delivery and recovery
 
@@ -55,5 +59,5 @@ Events are delivered in sequence order to each connected client. Each client has
 
 ## Explicit exclusions
 
-Version 0.1 does not include exclusive client ownership, foreground-app detection, OS accessibility handoff, confidence values, debounce policy, hold events, per-client subscriptions, remote clients, or client-to-daemon control messages.
+Version 0.1 does not include exclusive client ownership, foreground-app detection, OS accessibility handoff, debounce policy, hold events, per-client subscriptions, remote clients, or client-to-daemon control messages.
 

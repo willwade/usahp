@@ -28,16 +28,25 @@ pub struct Hello {
     pub switches: Vec<SwitchSnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SwitchEvent {
     pub protocol_version: String,
     pub sequence: u64,
     pub monotonic_us: u64,
     pub switch_id: String,
     pub action: Action,
+    /// Analog activation confidence in the range 0.0–100.0. Binary switches
+    /// emit `100.0` on `Pressed` and `0.0` on `Released`; analog sources
+    /// (BCI, facial-gesture, pressure) stream a raw probability instead.
+    ///
+    /// `serde(default)` keeps this field optional on the wire: clients built
+    /// against this struct tolerate older servers that omit it (defaulting to
+    /// `0.0`), and older clients simply ignore the extra field.
+    #[serde(default)]
+    pub confidence: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     Hello(Hello),
@@ -56,10 +65,23 @@ mod tests {
             monotonic_us: 1_843_201,
             switch_id: "switch_1".into(),
             action: Action::Pressed,
+            confidence: 100.0,
         });
         let value = serde_json::to_value(message).unwrap();
         assert_eq!(value["type"], "switch_event");
         assert_eq!(value["protocol_version"], "0.1");
         assert_eq!(value["action"], "pressed");
+        assert_eq!(value["confidence"], 100.0);
+    }
+
+    #[test]
+    fn event_without_confidence_defaults_to_zero() {
+        // An older server that omits `confidence` must still deserialize.
+        let json = r#"{"type":"switch_event","protocol_version":"0.1","sequence":1,"monotonic_us":0,"switch_id":"switch_1","action":"released"}"#;
+        let parsed: ServerMessage = serde_json::from_str(json).unwrap();
+        let ServerMessage::SwitchEvent(event) = parsed else {
+            panic!("expected switch_event");
+        };
+        assert_eq!(event.confidence, 0.0);
     }
 }
