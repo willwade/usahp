@@ -61,3 +61,7 @@ Events are delivered in sequence order to each connected client. Each client has
 
 Version 0.1 does not include exclusive client ownership, foreground-app detection, OS accessibility handoff, debounce policy, hold events, per-client subscriptions, remote clients, or client-to-daemon control messages.
 
+## Failsafes
+
+Protocol 0.1 does **not** enforce the safety triggers defined in RFC §5: there is no escape-hatch detection (Trigger A, e.g. a sustained-hold revoke) and no software heartbeat (Trigger B, the client ack ping). A v0 daemon routes events passively and makes no claim of clinical lockout protection — a client must not assume it will be forcibly released from a stuck state by the broker. Failsafes belong to the future OS-handoff layer (RFC §4 `STATE_APP_CONTROL` and §5), not to this event-broker protocol.
+
