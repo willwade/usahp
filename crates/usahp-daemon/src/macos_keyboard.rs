@@ -144,3 +144,68 @@ pub fn spawn(mappings: &[Mapping], broker: mpsc::Sender<BrokerCommand>, capture:
         tracing::error!(%error, "could not spawn macOS tap thread");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::name_to_keycode;
+
+    #[test]
+    fn maps_every_documented_keyboard_code() {
+        let keycodes = name_to_keycode();
+        let expected = [
+            ("space", 49),
+            ("return", 36),
+            ("escape", 53),
+            ("tab", 48),
+            ("up", 126),
+            ("down", 125),
+            ("left", 123),
+            ("right", 124),
+            ("a", 0),
+            ("b", 11),
+            ("c", 8),
+            ("d", 2),
+            ("e", 14),
+            ("f", 3),
+            ("g", 5),
+            ("h", 4),
+            ("i", 34),
+            ("j", 38),
+            ("k", 40),
+            ("l", 37),
+            ("m", 46),
+            ("n", 45),
+            ("o", 31),
+            ("p", 35),
+            ("q", 12),
+            ("r", 15),
+            ("s", 1),
+            ("t", 17),
+            ("u", 32),
+            ("v", 9),
+            ("w", 13),
+            ("x", 7),
+            ("y", 16),
+            ("z", 6),
+        ];
+
+        for (name, keycode) in expected {
+            assert_eq!(keycodes.get(name), Some(&keycode), "{name}");
+        }
+    }
+
+    #[test]
+    fn aliases_share_virtual_keycodes() {
+        let keycodes = name_to_keycode();
+        for (alias, canonical) in [
+            ("enter", "return"),
+            ("esc", "escape"),
+            ("uparrow", "up"),
+            ("downarrow", "down"),
+            ("leftarrow", "left"),
+            ("rightarrow", "right"),
+        ] {
+            assert_eq!(keycodes.get(alias), keycodes.get(canonical), "{alias}");
+        }
+    }
+}

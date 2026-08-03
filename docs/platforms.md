@@ -10,7 +10,7 @@ Protocol 0.1 does not accept Windows gamepad mappings because its backend cannot
 
 ## macOS
 
-Grant **Accessibility** permission to the terminal or packaged executable that runs `usahpd`:
+Keyboard capture uses a native session `CGEventTap` that reads virtual keycodes without invoking macOS Text Services. Grant **Accessibility** permission to the terminal or packaged executable that runs `usahpd`:
 
 1. Open System Settings.
 2. Go to Privacy & Security → Accessibility.
@@ -18,6 +18,8 @@ Grant **Accessibility** permission to the terminal or packaged executable that r
 4. Restart the daemon after changing permission.
 
 Protocol 0.1 does not accept macOS gamepad mappings because its backend cannot guarantee suppression.
+
+Before release, verify capture, suppression, pause pass-through, Accessibility denial, and clean shutdown manually on a real Mac. Hosted runners compile and test the keycode mapping but cannot grant interactive Accessibility permission.
 
 ## Linux
 
