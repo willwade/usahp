@@ -16,6 +16,10 @@ use crate::input::CaptureControl;
 
 pub const HEARTBEAT_INTERVAL_MS: u32 = 500;
 pub const MISSED_HEARTBEAT_LIMIT: u32 = 3;
+/// Escape hatch (Trigger A): if any switch is held continuously for this
+/// duration during an active session, the session is force-revoked and
+/// control returns to the OS. The user is never trapped.
+pub const ESCAPE_HOLD_MS: u64 = 4000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PhysicalEvent {
@@ -64,6 +68,9 @@ struct Runtime {
     clients: HashMap<u64, mpsc::Sender<Arc<ServerMessage>>>,
     session: Option<Session>,
     paused: bool,
+    /// Per-switch press timestamps for escape-hatch monitoring. Entries
+    /// exist while a switch is physically held; removed on release.
+    escape_tracker: HashMap<String, Instant>,
 }
 
 pub fn spawn(mappings: Vec<Mapping>, capture: CaptureControl) -> mpsc::Sender<BrokerCommand> {
@@ -86,6 +93,7 @@ async fn run(
         clients: HashMap::new(),
         session: None,
         paused: false,
+        escape_tracker: HashMap::new(),
     };
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -124,6 +132,7 @@ async fn run(
                 }
             }
             _ = ticker.tick() => {
+                // Heartbeat timeout check.
                 let timed_out = runtime.session.as_ref().is_some_and(|session| {
                     session.last_heartbeat.elapsed()
                         >= Duration::from_millis(
@@ -132,6 +141,26 @@ async fn run(
                 });
                 if timed_out {
                     runtime.revoke(SessionRevocationReason::HeartbeatTimeout).await;
+                    continue;
+                }
+
+                // Escape-hatch check (Trigger A): if any switch has been held
+                // continuously for ESCAPE_HOLD_MS during an active session,
+                // force-revoke. The user is never trapped.
+                if runtime.session.is_some() {
+                    let escape_switch = runtime
+                        .escape_tracker
+                        .iter()
+                        .find_map(|(switch_id, pressed_at)| {
+                            (pressed_at.elapsed()
+                                >= Duration::from_millis(ESCAPE_HOLD_MS))
+                            .then_some(switch_id.clone())
+                        });
+                    if let Some(switch_id) = escape_switch {
+                        tracing::warn!(%switch_id, "escape hatch triggered — sustained hold exceeded {}ms", ESCAPE_HOLD_MS);
+                        runtime.escape_tracker.clear();
+                        runtime.revoke(SessionRevocationReason::EscapeHatch).await;
+                    }
                 }
             }
         }
@@ -174,6 +203,19 @@ impl Runtime {
             .apply(&event.mapping_id, event.action, event.confidence)
         {
             Ok(Some(transition)) => {
+                // Escape-hatch tracking: record logical press timestamps so
+                // the ticker can detect sustained holds. Events still flow
+                // through to clients unmodified — this is a parallel monitor.
+                match transition.action {
+                    Action::Pressed => {
+                        self.escape_tracker
+                            .insert(transition.switch_id.clone(), Instant::now());
+                    }
+                    Action::Released => {
+                        self.escape_tracker.remove(&transition.switch_id);
+                    }
+                }
+
                 let message = self.event(
                     transition.switch_id,
                     transition.action,
@@ -276,6 +318,8 @@ impl Runtime {
         let Some(session) = self.session.take() else {
             return;
         };
+        // Clear escape-hatch tracking on any revocation.
+        self.escape_tracker.clear();
         // Disable callbacks before releasing broker state so no physical edge can
         // race into the new paused epoch.
         if let Err(error) = self.capture.pause().await {
@@ -832,6 +876,151 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "session should NOT be revoked when session has no PID"
+        );
+    }
+
+    #[tokio::test]
+    async fn escape_hatch_revokes_session_on_sustained_hold() {
+        let broker = spawn(vec![mapping("a", "switch_1")], CaptureControl::default());
+        let (client_id, mut rx) = register(&broker, 8).await;
+        rx.recv().await.unwrap(); // hello
+
+        // Establish a session.
+        broker
+            .send(BrokerCommand::Handshake {
+                client_id,
+                handshake: handshake("com.test.app"),
+            })
+            .await
+            .unwrap();
+        let response = rx.recv().await.unwrap();
+        let session_id = match &*response {
+            ServerMessage::HandshakeResponse(HandshakeResponse::Accepted {
+                session_id, ..
+            }) => session_id.clone(),
+            _ => panic!("expected ACCEPTED, got {:?}", *response),
+        };
+
+        // Press switch_1 — the escape tracker starts.
+        broker
+            .send(BrokerCommand::Input(PhysicalEvent {
+                mapping_id: "a".into(),
+                action: Action::Pressed,
+                confidence: Some(100.0),
+            }))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        rx.try_recv().ok(); // consume switch_event
+
+        // Keep the session alive with heartbeats while we wait for the escape
+        // threshold (ESCAPE_HOLD_MS = 4000ms > heartbeat timeout 1500ms).
+        let hb_broker = broker.clone();
+        let hb_sid = session_id;
+        let hb_task = tokio::spawn(async move {
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                if hb_broker
+                    .send(BrokerCommand::Heartbeat {
+                        client_id,
+                        session_id: hb_sid.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        // Wait for the escape hatch to fire.
+        let mut found_escape = false;
+        for _ in 0..30 {
+            if let Ok(Some(msg)) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await
+            {
+                if let ServerMessage::SessionRevoked(rev) = &*msg {
+                    if rev.reason == SessionRevocationReason::EscapeHatch {
+                        found_escape = true;
+                        break;
+                    }
+                }
+            }
+        }
+        hb_task.abort();
+        assert!(
+            found_escape,
+            "expected EscapeHatch revocation after sustained hold"
+        );
+    }
+
+    #[tokio::test]
+    async fn escape_hatch_does_not_fire_if_switch_released_in_time() {
+        let broker = spawn(vec![mapping("a", "switch_1")], CaptureControl::default());
+        let (client_id, mut rx) = register(&broker, 8).await;
+        rx.recv().await.unwrap(); // hello
+
+        broker
+            .send(BrokerCommand::Handshake {
+                client_id,
+                handshake: handshake("com.test.app"),
+            })
+            .await
+            .unwrap();
+        let response = rx.recv().await.unwrap();
+        let session_id = match &*response {
+            ServerMessage::HandshakeResponse(HandshakeResponse::Accepted {
+                session_id, ..
+            }) => session_id.clone(),
+            _ => panic!("expected ACCEPTED"),
+        };
+
+        // Press and release quickly (well under ESCAPE_HOLD_MS).
+        broker
+            .send(BrokerCommand::Input(PhysicalEvent {
+                mapping_id: "a".into(),
+                action: Action::Pressed,
+                confidence: Some(100.0),
+            }))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        rx.try_recv().ok();
+
+        broker
+            .send(BrokerCommand::Input(PhysicalEvent {
+                mapping_id: "a".into(),
+                action: Action::Released,
+                confidence: Some(0.0),
+            }))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        rx.try_recv().ok();
+
+        // Keep alive with heartbeats past ESCAPE_HOLD_MS.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(4500);
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            broker
+                .send(BrokerCommand::Heartbeat {
+                    client_id,
+                    session_id: session_id.clone(),
+                })
+                .await
+                .ok();
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+
+        // Session should still be alive — no EscapeHatch.
+        let revoked = matches!(
+            rx.try_recv(),
+            Ok(msg) if matches!(&*msg, ServerMessage::SessionRevoked(rev) if rev.reason == SessionRevocationReason::EscapeHatch)
+        );
+        assert!(
+            !revoked,
+            "session should NOT be revoked if switch was released in time"
         );
     }
 }

@@ -144,6 +144,7 @@ pub enum SessionRevocationReason {
     QueueOverflow,
     ExplicitRevocation,
     FocusLost,
+    EscapeHatch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
