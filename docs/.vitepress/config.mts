@@ -34,6 +34,7 @@ export default defineConfig({
     },
     nav: [
       { text: 'Guide', link: '/quick-start' },
+      { text: 'Specification', link: '/spec' },
       { text: 'Protocol 0.1', link: '/protocol-v0' },
       { text: 'GitHub', link: repository }
     ],
@@ -53,6 +54,13 @@ export default defineConfig({
           { text: 'Client integration', link: '/clients' },
           { text: 'Platform requirements', link: '/platforms' },
           { text: 'Simulator and testing', link: '/simulator' }
+        ]
+      },
+      {
+        text: 'Specification',
+        items: [
+          { text: 'RFC (Draft)', link: '/spec' },
+          { text: 'Plain English', link: '/plain-english' }
         ]
       },
       {
