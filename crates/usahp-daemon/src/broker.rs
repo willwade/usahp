@@ -1066,7 +1066,8 @@ mod tests {
         for _ in 0..10 {
             let msg = rx.recv().await.unwrap();
             if let ServerMessage::HandshakeResponse(HandshakeResponse::Accepted {
-                session_id: sid, ..
+                session_id: sid,
+                ..
             }) = &*msg
             {
                 session_id = Some(sid.clone());
