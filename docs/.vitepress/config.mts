@@ -35,7 +35,7 @@ export default defineConfig({
     nav: [
       { text: 'Guide', link: '/quick-start' },
       { text: 'Draft specification', link: '/spec' },
-      { text: 'Protocol 0.1', link: '/protocol-v0' },
+      { text: 'Protocol 0.2', link: '/protocol-v0' },
       { text: 'GitHub', link: repository }
     ],
     sidebar: [
@@ -66,7 +66,7 @@ export default defineConfig({
       {
         text: 'Reference',
         items: [
-          { text: 'Protocol 0.1', link: '/protocol-v0' },
+          { text: 'Protocol 0.2', link: '/protocol-v0' },
           { text: 'Limits and exclusions', link: '/limitations' },
           { text: 'Development', link: '/development' }
         ]
@@ -88,7 +88,7 @@ export default defineConfig({
     },
     footer: {
       message: 'Released under the MIT License.',
-      copyright: 'USAHP is an experimental protocol 0.1 project.'
+      copyright: 'USAHP is an experimental protocol 0.2 project.'
     },
     outline: {
       level: [2, 3],

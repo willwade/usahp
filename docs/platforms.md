@@ -6,7 +6,7 @@ Physical input capture depends on operating-system permissions. The built-in sim
 
 Keyboard suppression uses a low-level global input hook. Run the daemon in an interactive desktop session. Windows security software may ask for approval or block the hook.
 
-Protocol 0.1 does not accept Windows gamepad mappings because its backend cannot guarantee suppression.
+Protocol 0.2 does not accept Windows gamepad mappings because its backend cannot guarantee suppression. While paused, the installed keyboard hook passes events through to Windows.
 
 ## macOS
 
@@ -17,7 +17,7 @@ Keyboard capture uses a native session `CGEventTap` that reads virtual keycodes 
 3. Enable the terminal or executable that launches USAHP.
 4. Restart the daemon after changing permission.
 
-Protocol 0.1 does not accept macOS gamepad mappings because its backend cannot guarantee suppression.
+Protocol 0.2 does not accept macOS gamepad mappings because its backend cannot guarantee suppression. While paused, the installed event tap passes keys through to macOS.
 
 Before release, verify capture, suppression, pause pass-through, Accessibility denial, and clean shutdown manually on a real Mac. Hosted runners compile and test the keycode mapping but cannot grant interactive Accessibility permission.
 
@@ -32,6 +32,8 @@ Linux gamepad and dedicated switch mappings require:
 - the numeric evdev key code for the desired control.
 
 Device event numbers can change between boots. A stable udev-created path is safer for a persistent setup.
+
+When a managed session is revoked, USAHP releases Linux evdev's exclusive grab. Before accepting another session it drains stale device events and reacquires the grab; failure produces `CAPTURE_UNAVAILABLE`.
 
 ## Verify suppression
 

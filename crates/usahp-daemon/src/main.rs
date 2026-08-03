@@ -30,12 +30,9 @@ async fn main() -> Result<()> {
     if config.simulator.stdin {
         broker_mappings.extend(usahp_daemon::simulator::mappings_for(&config.mappings));
     }
-    let broker = usahp_daemon::broker::spawn(broker_mappings);
-    usahp_daemon::input::spawn(
-        &config.mappings,
-        broker.clone(),
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-    )?;
+    let capture = usahp_daemon::input::CaptureControl::new_enabled();
+    let broker = usahp_daemon::broker::spawn(broker_mappings, capture.clone());
+    usahp_daemon::input::spawn(&config.mappings, broker.clone(), capture)?;
     if config.simulator.stdin {
         usahp_daemon::simulator::spawn_stdin(broker.clone(), &config.mappings);
     }

@@ -3,7 +3,7 @@
 This is a plain-language companion to the [draft USAHP handoff specification](/spec). It explains a possible future standard. It is not a description of everything the current USAHP broker can do.
 
 ::: warning Draft, not a current guarantee
-The implemented contract is [protocol 0.1](/protocol-v0). Features such as operating-system handoff, arbitration, escape hatches, and continuous confidence are proposed future work.
+The implemented contract is [protocol 0.2](/protocol-v0). It provides one local heartbeat-managed session, but operating-system handoff, focus detection, arbitration, escape hatches, and continuous confidence remain proposed future work.
 :::
 
 ## The problem
@@ -30,7 +30,7 @@ The draft explores two complementary mechanisms:
 - **Escape hatch:** a user-controlled hardware pattern that an OS-level service would intercept before an application.
 - **Heartbeat:** a session client periodically proves it is responsive; missed heartbeats cause revocation.
 
-The escape hatch and system-level recovery are not implemented. A heartbeat-backed local session is planned for protocol 0.2, but it must not be described as clinical lockout protection.
+The escape hatch and system-level recovery are not implemented. A heartbeat-backed local session exists in protocol 0.2, but it is not operating-system recovery or clinical lockout protection.
 
 ## Proposed application roles
 
@@ -40,7 +40,7 @@ The future design considers three roles:
 - **Primary controller:** an approved background controller receives global input.
 - **Passive observer:** an application receives a read-only copy.
 
-Only one local exclusive session is planned for the next broker version. Focus detection, primary controllers, passive subscriptions, arbitration UI, and operating-system enforcement remain future work.
+The broker implements one local `exclusive_foreground` session without checking actual window focus. Primary controllers, passive subscriptions during exclusivity, arbitration UI, and operating-system enforcement remain future work.
 
 ## Confidence
 
@@ -65,12 +65,12 @@ The implemented Rust broker currently:
 - captures and suppresses configured keyboard input on Windows, macOS, and Linux;
 - supports exclusively grabbed evdev switch or gamepad devices on Linux;
 - aggregates physical inputs into logical `pressed` and `released` edges;
-- broadcasts versioned JSON events on `ws://127.0.0.1:7312`;
+- provides legacy broadcasts and one heartbeat-managed exclusive route on `ws://127.0.0.1:7312`;
 - provides a simulator and reference listener;
 - carries interim binary confidence values;
-- exposes a low-level capture flag for embedded hosts.
+- releases held state and pauses capture after managed-session revocation.
 
-It does not currently provide a handshake, heartbeat, OS scanning, focus detection, arbitration, escape hatch, remote access, or continuous confidence stream.
+It does not provide OS scanning, focus detection, arbitration, an escape hatch, remote access, or a continuous confidence stream.
 
 ## For developers today
 
