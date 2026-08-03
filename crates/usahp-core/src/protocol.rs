@@ -51,6 +51,50 @@ pub struct SwitchEvent {
 pub enum ServerMessage {
     Hello(Hello),
     SwitchEvent(SwitchEvent),
+    HandshakeResponse(HandshakeResponse),
+    SessionRevoked(SessionRevoked),
+}
+
+// ---- Session / heartbeat (Stage 1, backward-compatible layer on v0.1) ----
+
+/// A handshake request from a client that wants active switch control.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Handshake {
+    pub protocol_version: String,
+    pub app_id: String,
+    pub requested_mode: String,
+    pub heartbeat_interval_ms: u32,
+    pub missed_heartbeat_limit: u32,
+}
+
+/// The daemon's response to a handshake.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HandshakeResponse {
+    #[serde(rename = "status")]
+    pub status: HandshakeStatus,
+    pub session_id: Option<String>,
+    pub heartbeat_interval_ms: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum HandshakeStatus {
+    Accepted,
+    Rejected,
+}
+
+/// Sent to a client when its session is revoked (heartbeat timeout or superseded).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionRevoked {
+    pub reason: String,
+}
+
+/// Messages a client sends TO the daemon (v0.1 is one-way; this is additive).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientMessage {
+    Handshake(Handshake),
+    Heartbeat,
 }
 
 #[cfg(test)]

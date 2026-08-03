@@ -4,6 +4,7 @@ mod state;
 
 pub use config::{Config, ConfigError, InputKind, Mapping, ServerConfig, SimulatorConfig};
 pub use protocol::{
-    Action, Hello, PROTOCOL_VERSION, ServerMessage, SwitchEvent, SwitchSnapshot, SwitchState,
+    Action, ClientMessage, Handshake, HandshakeResponse, HandshakeStatus, Hello, PROTOCOL_VERSION,
+    ServerMessage, SessionRevoked, SwitchEvent, SwitchSnapshot, SwitchState,
 };
 pub use state::{LogicalTransition, StateError, SwitchStateMachine};

@@ -1,14 +1,14 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result};
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{mpsc, oneshot},
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{debug, info, warn};
-use usahp_core::ServerMessage;
+use usahp_core::{ClientMessage, ServerMessage};
 
 use crate::broker::BrokerCommand;
 
@@ -35,9 +35,10 @@ async fn handle_client(
     broker: mpsc::Sender<BrokerCommand>,
     queue_capacity: usize,
 ) -> Result<()> {
-    let mut websocket = accept_async(stream)
+    let websocket = accept_async(stream)
         .await
         .context("WebSocket handshake failed")?;
+    let (mut ws_sink, mut ws_stream) = websocket.split();
     let (sender, mut receiver) = mpsc::channel::<Arc<ServerMessage>>(queue_capacity);
     let (reply, registered) = oneshot::channel();
     broker
@@ -47,10 +48,45 @@ async fn handle_client(
     let client_id = registered.await.context("broker rejected registration")?;
     debug!(client_id, %peer, "client connected");
 
-    while let Some(message) = receiver.recv().await {
-        let json = serde_json::to_string(&*message)?;
-        if websocket.send(Message::Text(json.into())).await.is_err() {
-            break;
+    loop {
+        tokio::select! {
+            // Daemon → client: forward broker messages.
+            msg = receiver.recv() => {
+                let Some(msg) = msg else { break; };
+                let json = serde_json::to_string(&*msg)?;
+                if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                    break;
+                }
+            }
+            // Client → daemon: read handshake / heartbeat.
+            msg = ws_stream.next() => {
+                match msg {
+                    Some(Ok(m)) if m.is_text() => {
+                        if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(
+                            m.to_text().unwrap_or(""),
+                        ) {
+                            match client_msg {
+                                ClientMessage::Handshake(hs) => {
+                                    let _ = broker
+                                        .send(BrokerCommand::Handshake {
+                                            client_id,
+                                            heartbeat_interval_ms: hs.heartbeat_interval_ms,
+                                            missed_heartbeat_limit: hs.missed_heartbeat_limit,
+                                        })
+                                        .await;
+                                }
+                                ClientMessage::Heartbeat => {
+                                    let _ = broker
+                                        .send(BrokerCommand::Heartbeat { client_id })
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    Some(Ok(_)) => {} // binary / ping / pong — ignore
+                    _ => break,        // error or connection closed
+                }
+            }
         }
     }
 

@@ -51,6 +51,10 @@ async fn main() -> Result<()> {
                 "#{:<6} +{:>10}us  {} {:?}  {:.1}%",
                 event.sequence, event.monotonic_us, event.switch_id, event.action, event.confidence
             ),
+            ServerMessage::HandshakeResponse(resp) => {
+                println!("handshake: {:?} session {:?}", resp.status, resp.session_id)
+            }
+            ServerMessage::SessionRevoked(rev) => println!("session revoked: {}", rev.reason),
         }
     }
     Ok(())

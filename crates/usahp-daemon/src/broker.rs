@@ -1,9 +1,14 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use usahp_core::{
-    Action, Hello, Mapping, PROTOCOL_VERSION, ServerMessage, SwitchEvent, SwitchStateMachine,
+    Action, HandshakeResponse, HandshakeStatus, Hello, Mapping, PROTOCOL_VERSION, ServerMessage,
+    SessionRevoked, SwitchEvent, SwitchStateMachine,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +25,21 @@ pub enum BrokerCommand {
         reply: oneshot::Sender<u64>,
     },
     Unregister(u64),
+    Handshake {
+        client_id: u64,
+        heartbeat_interval_ms: u32,
+        missed_heartbeat_limit: u32,
+    },
+    Heartbeat {
+        client_id: u64,
+    },
+}
+
+struct Session {
+    client_id: u64,
+    heartbeat_interval: Duration,
+    heartbeat_limit: u32,
+    last_heartbeat: Instant,
 }
 
 pub fn spawn(mappings: Vec<Mapping>) -> mpsc::Sender<BrokerCommand> {
@@ -34,49 +54,123 @@ async fn run(mut receiver: mpsc::Receiver<BrokerCommand>, mappings: Vec<Mapping>
     let mut sequence = 0_u64;
     let mut next_client = 1_u64;
     let mut clients: HashMap<u64, mpsc::Sender<Arc<ServerMessage>>> = HashMap::new();
+    let mut session: Option<Session> = None;
+    let mut ticker = tokio::time::interval(Duration::from_millis(250));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    while let Some(command) = receiver.recv().await {
-        match command {
-            BrokerCommand::Register { sender, reply } => {
-                let client_id = next_client;
-                next_client += 1;
-                let hello = Arc::new(ServerMessage::Hello(Hello {
-                    protocol_version: PROTOCOL_VERSION.into(),
-                    switches: state.snapshots(),
-                }));
-                if sender.try_send(hello).is_ok() {
-                    clients.insert(client_id, sender);
-                    let _ = reply.send(client_id);
-                }
-            }
-            BrokerCommand::Unregister(client_id) => {
-                clients.remove(&client_id);
-            }
-            BrokerCommand::Input(event) => match state.apply(&event.mapping_id, event.action) {
-                Ok(Some(transition)) => {
-                    sequence += 1;
-                    let message = Arc::new(ServerMessage::SwitchEvent(SwitchEvent {
-                        protocol_version: PROTOCOL_VERSION.into(),
-                        sequence,
-                        monotonic_us: started.elapsed().as_micros().min(u64::MAX as u128) as u64,
-                        switch_id: transition.switch_id,
-                        action: transition.action,
-                        confidence: match transition.action {
-                            Action::Pressed => 100.0,
-                            Action::Released => 0.0,
-                        },
-                    }));
-                    clients.retain(|client_id, sender| match sender.try_send(message.clone()) {
-                        Ok(()) => true,
-                        Err(error) => {
-                            warn!(client_id, %error, "disconnecting slow or closed client");
-                            false
+    loop {
+        tokio::select! {
+            command = receiver.recv() => {
+                let Some(command) = command else { break; };
+                match command {
+                    BrokerCommand::Register { sender, reply } => {
+                        let client_id = next_client;
+                        next_client += 1;
+                        let hello = Arc::new(ServerMessage::Hello(Hello {
+                            protocol_version: PROTOCOL_VERSION.into(),
+                            switches: state.snapshots(),
+                        }));
+                        if sender.try_send(hello).is_ok() {
+                            clients.insert(client_id, sender);
+                            let _ = reply.send(client_id);
                         }
-                    });
+                    }
+                    BrokerCommand::Unregister(client_id) => {
+                        clients.remove(&client_id);
+                        if session.as_ref().is_some_and(|s| s.client_id == client_id) {
+                            session = None;
+                            info!(client_id, "session client disconnected");
+                        }
+                    }
+                    BrokerCommand::Input(event) => match state.apply(&event.mapping_id, event.action) {
+                        Ok(Some(transition)) => {
+                            sequence += 1;
+                            let message = Arc::new(ServerMessage::SwitchEvent(SwitchEvent {
+                                protocol_version: PROTOCOL_VERSION.into(),
+                                sequence,
+                                monotonic_us: started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                                switch_id: transition.switch_id,
+                                action: transition.action,
+                                confidence: match transition.action {
+                                    Action::Pressed => 100.0,
+                                    Action::Released => 0.0,
+                                },
+                            }));
+                            if let Some(sess) = session.as_ref() {
+                                // Exclusive: send only to the session client.
+                                if let Some(sender) = clients.get(&sess.client_id) {
+                                    if sender.try_send(message).is_err() {
+                                        warn!(client_id = sess.client_id, "session queue full — dropping session");
+                                        clients.remove(&sess.client_id);
+                                        session = None;
+                                    }
+                                }
+                            } else {
+                                // No session: broadcast to all (backward compatible).
+                                clients.retain(|cid, sender| match sender.try_send(message.clone()) {
+                                    Ok(()) => true,
+                                    Err(error) => {
+                                        warn!(client_id = cid, %error, "disconnecting slow or closed client");
+                                        false
+                                    }
+                                });
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => debug!(%error, "ignored invalid physical transition"),
+                    },
+                    BrokerCommand::Handshake { client_id, heartbeat_interval_ms, missed_heartbeat_limit } => {
+                        // Revoke the previous session if one exists.
+                        if let Some(old) = session.take() {
+                            if let Some(sender) = clients.get(&old.client_id) {
+                                let _ = sender.try_send(Arc::new(ServerMessage::SessionRevoked(
+                                    SessionRevoked { reason: "SUPERSEDED".into() },
+                                )));
+                            }
+                            info!(old_client = old.client_id, "session superseded");
+                        }
+                        session = Some(Session {
+                            client_id,
+                            heartbeat_interval: Duration::from_millis(heartbeat_interval_ms as u64),
+                            heartbeat_limit: missed_heartbeat_limit,
+                            last_heartbeat: Instant::now(),
+                        });
+                        if let Some(sender) = clients.get(&client_id) {
+                            let _ = sender.try_send(Arc::new(ServerMessage::HandshakeResponse(
+                                HandshakeResponse {
+                                    status: HandshakeStatus::Accepted,
+                                    session_id: Some(format!("sess_{client_id}")),
+                                    heartbeat_interval_ms,
+                                },
+                            )));
+                        }
+                        info!(client_id, "handshake accepted");
+                    }
+                    BrokerCommand::Heartbeat { client_id } => {
+                        if let Some(sess) = session.as_mut() {
+                            if sess.client_id == client_id {
+                                sess.last_heartbeat = Instant::now();
+                            }
+                        }
+                    }
                 }
-                Ok(None) => {}
-                Err(error) => debug!(%error, "ignored invalid physical transition"),
-            },
+            }
+            _ = ticker.tick() => {
+                // Check heartbeat timeout.
+                if let Some(sess) = session.as_ref() {
+                    let timeout = sess.heartbeat_interval * sess.heartbeat_limit;
+                    if sess.last_heartbeat.elapsed() > timeout {
+                        let cid = sess.client_id;
+                        if let Some(sender) = clients.get(&cid) {
+                            let _ = sender.try_send(Arc::new(ServerMessage::SessionRevoked(
+                                SessionRevoked { reason: "HEARTBEAT_TIMEOUT".into() },
+                            )));
+                        }
+                        session = None;
+                        warn!(client_id = cid, "session revoked — heartbeat timeout");
+                    }
+                }
+            }
         }
     }
 }
