@@ -42,11 +42,15 @@ pub enum BrokerCommand {
     RevokeSession {
         reason: SessionRevocationReason,
     },
+    FocusChanged {
+        frontmost_pid: Option<u32>,
+    },
 }
 
 struct Session {
     client_id: u64,
     session_id: String,
+    pid: Option<u32>,
     last_heartbeat: Instant,
 }
 
@@ -105,6 +109,17 @@ async fn run(
                         }
                     }
                     BrokerCommand::RevokeSession { reason } => runtime.revoke(reason).await,
+                    BrokerCommand::FocusChanged { frontmost_pid } => {
+                        let needs_revoke = runtime
+                            .session
+                            .as_ref()
+                            .is_some_and(|session| {
+                                session.pid.is_some_and(|pid| Some(pid) != frontmost_pid)
+                            });
+                        if needs_revoke {
+                            runtime.revoke(SessionRevocationReason::FocusLost).await;
+                        }
+                    }
                 }
             }
             _ = ticker.tick() => {
@@ -230,6 +245,7 @@ impl Runtime {
         self.session = Some(Session {
             client_id,
             session_id: session_id.clone(),
+            pid: handshake.pid,
             last_heartbeat: Instant::now(),
         });
         let accepted = self.send_response(
@@ -352,6 +368,16 @@ mod tests {
             protocol_version: PROTOCOL_VERSION.into(),
             app_id: app_id.into(),
             requested_mode: RequestedMode::ExclusiveForeground,
+            pid: None,
+        }
+    }
+
+    fn handshake_with_pid(app_id: &str, pid: u32) -> Handshake {
+        Handshake {
+            protocol_version: PROTOCOL_VERSION.into(),
+            app_id: app_id.into(),
+            requested_mode: RequestedMode::ExclusiveForeground,
+            pid: Some(pid),
         }
     }
 
@@ -686,6 +712,100 @@ mod tests {
             samples[94] < Duration::from_millis(20),
             "p95={:?}",
             samples[94]
+        );
+    }
+
+    #[tokio::test]
+    async fn focus_changed_revokes_session_with_mismatched_pid() {
+        let broker = spawn(vec![mapping("a", "switch_1")], CaptureControl::default());
+        let (client_id, mut rx) = register(&broker, 8).await;
+        rx.recv().await.unwrap(); // hello
+
+        // Handshake with PID 1000
+        broker
+            .send(BrokerCommand::Handshake {
+                client_id,
+                handshake: handshake_with_pid("com.test.app", 1000),
+            })
+            .await
+            .unwrap();
+        rx.recv().await.unwrap(); // handshake response
+
+        // Focus changes to a different PID
+        broker
+            .send(BrokerCommand::FocusChanged {
+                frontmost_pid: Some(2000),
+            })
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+
+        // Client should receive SessionRevoked with FocusLost
+        let msg = rx.try_recv().expect("should have a message");
+        let ServerMessage::SessionRevoked(rev) = &*msg else {
+            panic!("expected SessionRevoked, got {:?}", *msg);
+        };
+        assert_eq!(rev.reason, SessionRevocationReason::FocusLost);
+    }
+
+    #[tokio::test]
+    async fn focus_changed_same_pid_keeps_session() {
+        let broker = spawn(vec![mapping("a", "switch_1")], CaptureControl::default());
+        let (client_id, mut rx) = register(&broker, 8).await;
+        rx.recv().await.unwrap(); // hello
+
+        broker
+            .send(BrokerCommand::Handshake {
+                client_id,
+                handshake: handshake_with_pid("com.test.app", 1000),
+            })
+            .await
+            .unwrap();
+        rx.recv().await.unwrap(); // handshake response
+
+        // Focus changes but PID matches — should NOT revoke
+        broker
+            .send(BrokerCommand::FocusChanged {
+                frontmost_pid: Some(1000),
+            })
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "session should NOT be revoked when PID matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn focus_changed_no_session_pid_does_not_revoke() {
+        let broker = spawn(vec![mapping("a", "switch_1")], CaptureControl::default());
+        let (client_id, mut rx) = register(&broker, 8).await;
+        rx.recv().await.unwrap(); // hello
+
+        // Handshake without PID (legacy/anonymous client)
+        broker
+            .send(BrokerCommand::Handshake {
+                client_id,
+                handshake: handshake("com.test.app"), // pid: None
+            })
+            .await
+            .unwrap();
+        rx.recv().await.unwrap(); // handshake response
+
+        // Focus changes — session should NOT be revoked (no PID to match)
+        broker
+            .send(BrokerCommand::FocusChanged {
+                frontmost_pid: Some(9999),
+            })
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "session should NOT be revoked when session has no PID"
         );
     }
 }

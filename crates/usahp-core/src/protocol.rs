@@ -71,6 +71,7 @@ pub struct Handshake {
     pub protocol_version: String,
     pub app_id: String,
     pub requested_mode: RequestedMode,
+    pub pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -104,6 +105,7 @@ pub enum SessionRevocationReason {
     HeartbeatTimeout,
     QueueOverflow,
     ExplicitRevocation,
+    FocusLost,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

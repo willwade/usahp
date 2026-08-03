@@ -176,6 +176,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION.into(),
                 app_id: app_id.into(),
                 requested_mode: RequestedMode::ExclusiveForeground,
+                pid: None,
             })
         };
         first
