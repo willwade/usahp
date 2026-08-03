@@ -53,4 +53,4 @@ The listener displays two ordered transitions. Simulator events use the same sta
 
 - Define physical inputs in [configuration](/configuration).
 - Connect your own app with the [client integration guide](/clients).
-- Read the complete [protocol 0.1 contract](/protocol-v0).
+- Read the complete [protocol 0.2 contract](/protocol-v0).

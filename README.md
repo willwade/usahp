@@ -1,14 +1,14 @@
 # USAHP
 
-**[Read the USAHP documentation](https://owenmcgirr.github.io/usahp/)** for setup, configuration, client integration, platform requirements, and the protocol 0.1 reference.
+**[Read the USAHP documentation](https://owenmcgirr.github.io/usahp/)** for setup, configuration, client integration, platform requirements, and the protocol 0.2 reference.
 
-USAHP v0 is a local, cross-platform switch-event broker. A foreground Rust daemon suppresses configured switch inputs, normalizes them to logical `pressed` and `released` edges, and broadcasts those edges to every connected local application over WebSocket.
+USAHP v0 is a local, cross-platform switch-event broker. A Rust daemon suppresses configured switch inputs, normalizes them to logical `pressed` and `released` edges, and serves local applications over WebSocket. Passive clients receive legacy broadcasts; protocol 0.2 clients may establish one heartbeat-managed exclusive session.
 
-This repository deliberately implements the narrow event-broker layer. It does **not** claim OS accessibility ownership, hand input between the OS and an app, select one active client, interpret holds, or make activation decisions.
+This repository deliberately implements the narrow event-broker layer. It does **not** claim OS accessibility ownership, detect the foreground app, arbitrate between applications, interpret holds, or make activation decisions.
 
 ## Status
 
-Experimental v0. The public wire protocol is version `0.1` and has no compatibility promise yet.
+Experimental v0. The public wire protocol is version `0.2.0` and has no compatibility promise yet.
 
 ## Quick start
 
@@ -53,11 +53,11 @@ Linux additionally supports gamepad and dedicated switch interfaces through `evd
 - **macOS:** grant Accessibility permission to the terminal or executable running `usahpd`.
 - **Linux:** keyboard grabbing requires access to input devices, commonly through the `input` or `plugdev` group. Linux gamepads require read access to the selected evdev path. Avoid running as root when a narrower device permission is possible.
 
-The daemon binds only to `127.0.0.1`, does not accept commands over WebSocket, and has no authentication or TLS in v0.
+The daemon binds only to `127.0.0.1` and has no authentication or TLS in v0. Protocol 0.2 accepts typed handshake and heartbeat messages; it has no remote control API.
 
 ## Protocol
 
-Clients receive a versioned JSON hello snapshot immediately after connecting, followed by ordered switch events. See the [protocol 0.1 documentation](https://owenmcgirr.github.io/usahp/protocol-v0) for the complete v0 contract.
+Clients receive a versioned JSON hello snapshot immediately after connecting, followed by ordered switch events. See the [protocol 0.2 documentation](https://owenmcgirr.github.io/usahp/protocol-v0) for passive and managed-session contracts.
 
 ## Development
 

@@ -18,6 +18,7 @@ tokio-tungstenite.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 usahp-core.workspace = true
+uuid.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"

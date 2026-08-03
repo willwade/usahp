@@ -91,6 +91,23 @@ impl SwitchStateMachine {
             })
             .collect()
     }
+
+    /// Clears every active physical mapping and returns one ordered release per
+    /// logical switch that was pressed.
+    pub fn release_all(&mut self) -> Vec<LogicalTransition> {
+        self.active_by_switch
+            .iter_mut()
+            .filter_map(|(switch_id, active)| {
+                (!active.is_empty()).then(|| {
+                    active.clear();
+                    LogicalTransition {
+                        switch_id: switch_id.clone(),
+                        action: Action::Released,
+                    }
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -127,6 +144,36 @@ mod tests {
         state.apply("space", Action::Pressed).unwrap();
         assert!(matches!(
             state.apply("space", Action::Pressed),
+            Err(StateError::InvalidTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn release_all_clears_many_to_one_state_in_switch_order() {
+        let mut all = mappings();
+        all.push(Mapping {
+            id: "z".into(),
+            switch_id: "switch_0".into(),
+            input: InputKind::Keyboard,
+            code: "z".into(),
+            device: None,
+        });
+        let mut state = SwitchStateMachine::new(&all);
+        state.apply("space", Action::Pressed).unwrap();
+        state.apply("enter", Action::Pressed).unwrap();
+        state.apply("z", Action::Pressed).unwrap();
+        let releases = state.release_all();
+        assert_eq!(releases.len(), 2);
+        assert_eq!(releases[0].switch_id, "switch_0");
+        assert_eq!(releases[1].switch_id, "switch_1");
+        assert!(
+            state
+                .snapshots()
+                .iter()
+                .all(|s| s.state == SwitchState::Released)
+        );
+        assert!(matches!(
+            state.apply("space", Action::Released),
             Err(StateError::InvalidTransition { .. })
         ));
     }

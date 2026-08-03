@@ -34,6 +34,8 @@ Simulator edges enter the same broker command channel as hardware edges. They th
 
 Only physical capture and OS suppression are bypassed.
 
+Simulator input is intentionally ignored while managed capture is paused, matching hardware input.
+
 ## Smoke test
 
 1. Start `usahpd` with `example.toml`.
@@ -52,4 +54,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-The test suite covers configuration, many-to-one aggregation, invalid transitions, sequencing, queue overflow disconnection, snapshots, multiple listeners, reconnect behaviour, and simulator parity.
+The test suite also covers typed handshake rejection, exclusivity, heartbeats, deterministic timeout, state-safe revocation, paused snapshots, reconnect behaviour, capture reacquisition failure, and WebSocket managed sessions.

@@ -3,7 +3,7 @@
 **Status:** Request for comments · **Category:** Proposed accessibility standard and IPC design
 
 ::: danger Aspirational draft
-This document describes a possible future standard. It is not the implemented USAHP contract and must not be used as evidence of current safety, operating-system integration, or platform support. See [protocol 0.1](/protocol-v0) for what the broker implements today.
+This document describes a possible future standard. It is not the implemented USAHP contract and must not be used as evidence of current safety, operating-system integration, or platform support. See [protocol 0.2](/protocol-v0) for what the broker implements today.
 :::
 
 ## **Abstract**
@@ -38,7 +38,7 @@ Communication between the OS-SD and Client App SHOULD occur via gRPC over Unix D
 
 ### **3.3 Versioning**
 
-USAHP uses **semantic versioning** (`MAJOR.MINOR.PATCH`, e.g. `1.0.0`) for the negotiated `protocol_version`. The `MAJOR` segment signals incompatible wire changes; clients MUST reject a mismatched `MAJOR` during the handshake (§6.2.2 `PROTOCOL_MISMATCH`). The finalized standard targets `1.0.0`. Pre-standard prototype implementations (the v0 broker) carry the interim tag `0.1`; this is explicitly a pre-`1.0.0` prototype version and MUST move to the semver scheme before the standard is declared stable.
+The target standard proposes semantic versioning (`MAJOR.MINOR.PATCH`, e.g. `1.0.0`) for negotiated `protocol_version`. The implemented prototype currently uses `0.2.0`; that version is experimental and is not a commitment to the draft's eventual compatibility rules.
 
 ## **4\. Protocol State Machine**
 
@@ -169,7 +169,7 @@ To support both standard foreground applications and background "Computer Contro
 > * **primary\_controller (Focus-Agnostic):** The Client App receives exclusive global access to the switches, regardless of whether it is in the foreground or background (e.g., Grid 3 or VoiceGarden driving the OS). This tier supersedes foreground applications.  
 > * **passive\_observer:** The Client App receives a read-only copy of switch events globally, regardless of focus. The app CANNOT consume, block, or alter the event routing. Multiple apps MAY hold this status simultaneously.
 
-> **Current implementation note:** The v0 broker exposes a low-level capture flag to embedded hosts. It does not detect focus, implement an `exclusive_foreground` session, provide system arbitration, or guarantee recovery. Those are future protocol and platform tasks.
+> **Current implementation note:** Protocol 0.2 implements one local session named `exclusive_foreground`, but does not detect actual focus, provide system arbitration, perform OS takeover, implement an escape hatch, or guarantee recovery.
 
 #### **6.5.2 The System Arbitration UI (Conflict Resolution)**
 

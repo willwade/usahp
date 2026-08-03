@@ -1,15 +1,21 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::Instant,
+};
 use tracing::{debug, info, warn};
 use usahp_core::{
-    Action, HandshakeResponse, HandshakeStatus, Hello, Mapping, PROTOCOL_VERSION, ServerMessage,
-    SessionRevoked, SwitchEvent, SwitchStateMachine,
+    Action, Handshake, HandshakeRejectionReason, HandshakeResponse, Hello, Mapping,
+    PROTOCOL_VERSION, RequestedMode, ServerMessage, SessionRevocationReason, SessionRevoked,
+    SwitchEvent, SwitchStateMachine, valid_app_id,
 };
+use uuid::Uuid;
+
+use crate::input::CaptureControl;
+
+pub const HEARTBEAT_INTERVAL_MS: u32 = 500;
+pub const MISSED_HEARTBEAT_LIMIT: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhysicalEvent {
@@ -27,35 +33,56 @@ pub enum BrokerCommand {
     Unregister(u64),
     Handshake {
         client_id: u64,
-        heartbeat_interval_ms: u32,
-        missed_heartbeat_limit: u32,
+        handshake: Handshake,
     },
     Heartbeat {
         client_id: u64,
+        session_id: String,
+    },
+    RevokeSession {
+        reason: SessionRevocationReason,
     },
 }
 
 struct Session {
     client_id: u64,
-    heartbeat_interval: Duration,
-    heartbeat_limit: u32,
+    session_id: String,
     last_heartbeat: Instant,
 }
 
-pub fn spawn(mappings: Vec<Mapping>) -> mpsc::Sender<BrokerCommand> {
+struct Runtime {
+    state: SwitchStateMachine,
+    capture: CaptureControl,
+    started: Instant,
+    sequence: u64,
+    next_client: u64,
+    clients: HashMap<u64, mpsc::Sender<Arc<ServerMessage>>>,
+    session: Option<Session>,
+    paused: bool,
+}
+
+pub fn spawn(mappings: Vec<Mapping>, capture: CaptureControl) -> mpsc::Sender<BrokerCommand> {
     let (sender, receiver) = mpsc::channel(1024);
-    tokio::spawn(run(receiver, mappings));
+    tokio::spawn(run(receiver, mappings, capture));
     sender
 }
 
-async fn run(mut receiver: mpsc::Receiver<BrokerCommand>, mappings: Vec<Mapping>) {
-    let mut state = SwitchStateMachine::new(&mappings);
-    let started = Instant::now();
-    let mut sequence = 0_u64;
-    let mut next_client = 1_u64;
-    let mut clients: HashMap<u64, mpsc::Sender<Arc<ServerMessage>>> = HashMap::new();
-    let mut session: Option<Session> = None;
-    let mut ticker = tokio::time::interval(Duration::from_millis(250));
+async fn run(
+    mut receiver: mpsc::Receiver<BrokerCommand>,
+    mappings: Vec<Mapping>,
+    capture: CaptureControl,
+) {
+    let mut runtime = Runtime {
+        state: SwitchStateMachine::new(&mappings),
+        capture,
+        started: Instant::now(),
+        sequence: 0,
+        next_client: 1,
+        clients: HashMap::new(),
+        session: None,
+        paused: false,
+    };
+    let mut ticker = tokio::time::interval(Duration::from_millis(100));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
@@ -63,115 +90,243 @@ async fn run(mut receiver: mpsc::Receiver<BrokerCommand>, mappings: Vec<Mapping>
             command = receiver.recv() => {
                 let Some(command) = command else { break; };
                 match command {
-                    BrokerCommand::Register { sender, reply } => {
-                        let client_id = next_client;
-                        next_client += 1;
-                        let hello = Arc::new(ServerMessage::Hello(Hello {
-                            protocol_version: PROTOCOL_VERSION.into(),
-                            switches: state.snapshots(),
-                        }));
-                        if sender.try_send(hello).is_ok() {
-                            clients.insert(client_id, sender);
-                            let _ = reply.send(client_id);
+                    BrokerCommand::Register { sender, reply } => runtime.register(sender, reply),
+                    BrokerCommand::Unregister(client_id) => runtime.unregister(client_id).await,
+                    BrokerCommand::Input(event) => runtime.input(event).await,
+                    BrokerCommand::Handshake { client_id, handshake } => {
+                        runtime.handshake(client_id, handshake).await;
+                    }
+                    BrokerCommand::Heartbeat { client_id, session_id } => {
+                        if let Some(session) = runtime.session.as_mut()
+                            && session.client_id == client_id
+                            && session.session_id == session_id
+                        {
+                            session.last_heartbeat = Instant::now();
                         }
                     }
-                    BrokerCommand::Unregister(client_id) => {
-                        clients.remove(&client_id);
-                        if session.as_ref().is_some_and(|s| s.client_id == client_id) {
-                            session = None;
-                            info!(client_id, "session client disconnected");
-                        }
-                    }
-                    BrokerCommand::Input(event) => match state.apply(&event.mapping_id, event.action) {
-                        Ok(Some(transition)) => {
-                            sequence += 1;
-                            let message = Arc::new(ServerMessage::SwitchEvent(SwitchEvent {
-                                protocol_version: PROTOCOL_VERSION.into(),
-                                sequence,
-                                monotonic_us: started.elapsed().as_micros().min(u64::MAX as u128) as u64,
-                                switch_id: transition.switch_id,
-                                action: transition.action,
-                                confidence: match transition.action {
-                                    Action::Pressed => 100.0,
-                                    Action::Released => 0.0,
-                                },
-                            }));
-                            if let Some(sess) = session.as_ref() {
-                                // Exclusive: send only to the session client.
-                                if let Some(sender) = clients.get(&sess.client_id) {
-                                    if sender.try_send(message).is_err() {
-                                        warn!(client_id = sess.client_id, "session queue full — dropping session");
-                                        clients.remove(&sess.client_id);
-                                        session = None;
-                                    }
-                                }
-                            } else {
-                                // No session: broadcast to all (backward compatible).
-                                clients.retain(|cid, sender| match sender.try_send(message.clone()) {
-                                    Ok(()) => true,
-                                    Err(error) => {
-                                        warn!(client_id = cid, %error, "disconnecting slow or closed client");
-                                        false
-                                    }
-                                });
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(error) => debug!(%error, "ignored invalid physical transition"),
-                    },
-                    BrokerCommand::Handshake { client_id, heartbeat_interval_ms, missed_heartbeat_limit } => {
-                        // Revoke the previous session if one exists.
-                        if let Some(old) = session.take() {
-                            if let Some(sender) = clients.get(&old.client_id) {
-                                let _ = sender.try_send(Arc::new(ServerMessage::SessionRevoked(
-                                    SessionRevoked { reason: "SUPERSEDED".into() },
-                                )));
-                            }
-                            info!(old_client = old.client_id, "session superseded");
-                        }
-                        session = Some(Session {
-                            client_id,
-                            heartbeat_interval: Duration::from_millis(heartbeat_interval_ms as u64),
-                            heartbeat_limit: missed_heartbeat_limit,
-                            last_heartbeat: Instant::now(),
-                        });
-                        if let Some(sender) = clients.get(&client_id) {
-                            let _ = sender.try_send(Arc::new(ServerMessage::HandshakeResponse(
-                                HandshakeResponse {
-                                    status: HandshakeStatus::Accepted,
-                                    session_id: Some(format!("sess_{client_id}")),
-                                    heartbeat_interval_ms,
-                                },
-                            )));
-                        }
-                        info!(client_id, "handshake accepted");
-                    }
-                    BrokerCommand::Heartbeat { client_id } => {
-                        if let Some(sess) = session.as_mut() {
-                            if sess.client_id == client_id {
-                                sess.last_heartbeat = Instant::now();
-                            }
-                        }
-                    }
+                    BrokerCommand::RevokeSession { reason } => runtime.revoke(reason).await,
                 }
             }
             _ = ticker.tick() => {
-                // Check heartbeat timeout.
-                if let Some(sess) = session.as_ref() {
-                    let timeout = sess.heartbeat_interval * sess.heartbeat_limit;
-                    if sess.last_heartbeat.elapsed() > timeout {
-                        let cid = sess.client_id;
-                        if let Some(sender) = clients.get(&cid) {
-                            let _ = sender.try_send(Arc::new(ServerMessage::SessionRevoked(
-                                SessionRevoked { reason: "HEARTBEAT_TIMEOUT".into() },
-                            )));
-                        }
-                        session = None;
-                        warn!(client_id = cid, "session revoked — heartbeat timeout");
-                    }
+                let timed_out = runtime.session.as_ref().is_some_and(|session| {
+                    session.last_heartbeat.elapsed()
+                        >= Duration::from_millis(
+                            u64::from(HEARTBEAT_INTERVAL_MS) * u64::from(MISSED_HEARTBEAT_LIMIT),
+                        )
+                });
+                if timed_out {
+                    runtime.revoke(SessionRevocationReason::HeartbeatTimeout).await;
                 }
             }
         }
+    }
+}
+
+impl Runtime {
+    fn register(&mut self, sender: mpsc::Sender<Arc<ServerMessage>>, reply: oneshot::Sender<u64>) {
+        let client_id = self.next_client;
+        self.next_client += 1;
+        let hello = Arc::new(ServerMessage::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION.into(),
+            switches: self.state.snapshots(),
+        }));
+        if sender.try_send(hello).is_ok() {
+            self.clients.insert(client_id, sender);
+            let _ = reply.send(client_id);
+        }
+    }
+
+    async fn unregister(&mut self, client_id: u64) {
+        self.clients.remove(&client_id);
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.client_id == client_id)
+        {
+            info!(client_id, "managed session disconnected");
+            self.revoke(SessionRevocationReason::ExplicitRevocation)
+                .await;
+        }
+    }
+
+    async fn input(&mut self, event: PhysicalEvent) {
+        if self.paused || !self.capture.enabled() {
+            return;
+        }
+        match self.state.apply(&event.mapping_id, event.action) {
+            Ok(Some(transition)) => {
+                let message = self.event(transition.switch_id, transition.action);
+                if let Some(client_id) = self.session.as_ref().map(|session| session.client_id) {
+                    let failed = self
+                        .clients
+                        .get(&client_id)
+                        .is_none_or(|sender| sender.try_send(message).is_err());
+                    if failed {
+                        self.clients.remove(&client_id);
+                        warn!(client_id, "managed session queue overflowed");
+                        self.revoke(SessionRevocationReason::QueueOverflow).await;
+                    }
+                } else {
+                    self.broadcast(message);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => debug!(%error, "ignored invalid or stale physical transition"),
+        }
+    }
+
+    async fn handshake(&mut self, client_id: u64, handshake: Handshake) {
+        let rejection = if handshake.protocol_version != PROTOCOL_VERSION {
+            Some(HandshakeRejectionReason::ProtocolMismatch)
+        } else if !valid_app_id(&handshake.app_id) {
+            Some(HandshakeRejectionReason::InvalidAppId)
+        } else if !matches!(handshake.requested_mode, RequestedMode::ExclusiveForeground) {
+            Some(HandshakeRejectionReason::UnsupportedMode)
+        } else if self.session.is_some() {
+            Some(HandshakeRejectionReason::SessionBusy)
+        } else {
+            None
+        };
+        if let Some(reason) = rejection {
+            self.send_response(
+                client_id,
+                HandshakeResponse::Rejected {
+                    protocol_version: PROTOCOL_VERSION.into(),
+                    reason,
+                },
+            );
+            return;
+        }
+
+        if self.paused
+            && let Err(error) = self.capture.resume().await
+        {
+            warn!(%error, "capture reacquisition failed");
+            self.send_response(
+                client_id,
+                HandshakeResponse::Rejected {
+                    protocol_version: PROTOCOL_VERSION.into(),
+                    reason: HandshakeRejectionReason::CaptureUnavailable,
+                },
+            );
+            return;
+        }
+
+        // The first managed session is a routing boundary: legacy held state is
+        // released globally before exclusive events begin.
+        if !self.paused {
+            let releases = self.release_messages();
+            for release in releases {
+                self.broadcast(release);
+            }
+        }
+        if !self.clients.contains_key(&client_id) {
+            let _ = self.capture.pause().await;
+            self.paused = true;
+            return;
+        }
+        self.paused = false;
+        let session_id = Uuid::new_v4().to_string();
+        self.session = Some(Session {
+            client_id,
+            session_id: session_id.clone(),
+            last_heartbeat: Instant::now(),
+        });
+        let accepted = self.send_response(
+            client_id,
+            HandshakeResponse::Accepted {
+                protocol_version: PROTOCOL_VERSION.into(),
+                session_id,
+                heartbeat_interval_ms: HEARTBEAT_INTERVAL_MS,
+                missed_heartbeat_limit: MISSED_HEARTBEAT_LIMIT,
+            },
+        );
+        if !accepted {
+            self.revoke(SessionRevocationReason::QueueOverflow).await;
+            return;
+        }
+        info!(client_id, "managed session accepted");
+    }
+
+    async fn revoke(&mut self, reason: SessionRevocationReason) {
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        // Disable callbacks before releasing broker state so no physical edge can
+        // race into the new paused epoch.
+        if let Err(error) = self.capture.pause().await {
+            warn!(%error, "capture backend pause failed");
+        }
+        self.paused = true;
+        let releases = self.release_messages();
+        let mut delivery_failed = false;
+        if let Some(sender) = self.clients.get(&session.client_id) {
+            for release in releases {
+                delivery_failed |= sender.try_send(release).is_err();
+            }
+            delivery_failed |= sender
+                .try_send(Arc::new(ServerMessage::SessionRevoked(SessionRevoked {
+                    protocol_version: PROTOCOL_VERSION.into(),
+                    session_id: session.session_id,
+                    reason,
+                })))
+                .is_err();
+        }
+        if delivery_failed {
+            self.clients.remove(&session.client_id);
+        }
+        warn!(
+            client_id = session.client_id,
+            ?reason,
+            "managed session revoked"
+        );
+    }
+
+    fn release_messages(&mut self) -> Vec<Arc<ServerMessage>> {
+        self.state
+            .release_all()
+            .into_iter()
+            .map(|transition| self.event(transition.switch_id, transition.action))
+            .collect()
+    }
+
+    fn event(&mut self, switch_id: String, action: Action) -> Arc<ServerMessage> {
+        self.sequence += 1;
+        Arc::new(ServerMessage::SwitchEvent(SwitchEvent {
+            protocol_version: PROTOCOL_VERSION.into(),
+            sequence: self.sequence,
+            monotonic_us: self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+            switch_id,
+            action,
+            confidence: if action == Action::Pressed {
+                100.0
+            } else {
+                0.0
+            },
+        }))
+    }
+
+    fn send_response(&mut self, client_id: u64, response: HandshakeResponse) -> bool {
+        let sent = self.clients.get(&client_id).is_some_and(|sender| {
+            sender
+                .try_send(Arc::new(ServerMessage::HandshakeResponse(response)))
+                .is_ok()
+        });
+        if !sent {
+            self.clients.remove(&client_id);
+        }
+        sent
+    }
+
+    fn broadcast(&mut self, message: Arc<ServerMessage>) {
+        self.clients
+            .retain(|client_id, sender| match sender.try_send(message.clone()) {
+                Ok(()) => true,
+                Err(error) => {
+                    warn!(client_id, %error, "disconnecting slow or closed passive client");
+                    false
+                }
+            });
     }
 }
 
@@ -192,6 +347,14 @@ mod tests {
         }
     }
 
+    fn handshake(app_id: &str) -> Handshake {
+        Handshake {
+            protocol_version: PROTOCOL_VERSION.into(),
+            app_id: app_id.into(),
+            requested_mode: RequestedMode::ExclusiveForeground,
+        }
+    }
+
     async fn register(
         broker: &mpsc::Sender<BrokerCommand>,
         capacity: usize,
@@ -206,8 +369,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_client_gets_current_state() {
-        let broker = spawn(vec![mapping("a", "switch_1")]);
+    async fn passive_clients_receive_snapshot_and_ordered_events() {
+        let broker = spawn(vec![mapping("a", "switch_1")], CaptureControl::default());
+        let (_, mut first) = register(&broker, 4).await;
+        let (_, mut second) = register(&broker, 4).await;
+        first.recv().await.unwrap();
+        second.recv().await.unwrap();
         broker
             .send(BrokerCommand::Input(PhysicalEvent {
                 mapping_id: "a".into(),
@@ -215,54 +382,246 @@ mod tests {
             }))
             .await
             .unwrap();
-        let (_, mut receiver) = register(&broker, 4).await;
-        let message = receiver.recv().await.unwrap();
-        let ServerMessage::Hello(hello) = &*message else {
-            panic!("expected hello")
-        };
-        assert_eq!(hello.switches[0].state, SwitchState::Pressed);
+        for receiver in [&mut first, &mut second] {
+            assert!(
+                matches!(&*receiver.recv().await.unwrap(), ServerMessage::SwitchEvent(e) if e.sequence == 1)
+            );
+        }
     }
 
     #[tokio::test]
-    async fn broadcasts_identical_ordered_events() {
-        let broker = spawn(vec![mapping("a", "switch_1")]);
-        let (_, mut first) = register(&broker, 4).await;
-        let (_, mut second) = register(&broker, 4).await;
+    async fn handshake_is_exclusive_and_busy_is_rejected() {
+        let broker = spawn(vec![mapping("a", "switch_1")], CaptureControl::default());
+        let (first_id, mut first) = register(&broker, 8).await;
+        let (second_id, mut second) = register(&broker, 8).await;
         first.recv().await.unwrap();
         second.recv().await.unwrap();
-
-        for action in [Action::Pressed, Action::Released] {
-            broker
-                .send(BrokerCommand::Input(PhysicalEvent {
-                    mapping_id: "a".into(),
-                    action,
-                }))
-                .await
-                .unwrap();
-        }
-
-        for expected in 1..=2 {
-            for receiver in [&mut first, &mut second] {
-                let ServerMessage::SwitchEvent(event) = &*receiver.recv().await.unwrap() else {
-                    panic!("expected event")
-                };
-                assert_eq!(event.sequence, expected);
-                // Binary switches emit 100.0 on press (seq 1) and 0.0 on release (seq 2).
-                let expected_confidence: f32 = if expected == 1 { 100.0 } else { 0.0 };
-                assert!(
-                    (event.confidence - expected_confidence).abs() <= f32::EPSILON,
-                    "confidence was {}",
-                    event.confidence
-                );
-            }
-        }
+        broker
+            .send(BrokerCommand::Handshake {
+                client_id: first_id,
+                handshake: handshake("org.first"),
+            })
+            .await
+            .unwrap();
+        let accepted = first.recv().await.unwrap();
+        assert!(matches!(
+            &*accepted,
+            ServerMessage::HandshakeResponse(HandshakeResponse::Accepted {
+                heartbeat_interval_ms: 500,
+                missed_heartbeat_limit: 3,
+                ..
+            })
+        ));
+        broker
+            .send(BrokerCommand::Handshake {
+                client_id: second_id,
+                handshake: handshake("org.second"),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            &*second.recv().await.unwrap(),
+            ServerMessage::HandshakeResponse(HandshakeResponse::Rejected {
+                reason: HandshakeRejectionReason::SessionBusy,
+                ..
+            })
+        ));
+        broker
+            .send(BrokerCommand::Input(PhysicalEvent {
+                mapping_id: "a".into(),
+                action: Action::Pressed,
+            }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            &*first.recv().await.unwrap(),
+            ServerMessage::SwitchEvent(_)
+        ));
+        tokio::task::yield_now().await;
+        assert!(matches!(second.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[tokio::test]
-    async fn disconnects_client_when_queue_is_full() {
-        let broker = spawn(vec![mapping("a", "switch_1")]);
-        let (_, mut receiver) = register(&broker, 1).await;
-        // Leave hello queued so the first event overflows the client queue.
+    async fn rejects_invalid_version_id_and_mode() {
+        let broker = spawn(vec![mapping("a", "switch_1")], CaptureControl::default());
+        let (id, mut receiver) = register(&broker, 8).await;
+        receiver.recv().await.unwrap();
+        let cases = [
+            (
+                Handshake {
+                    protocol_version: "0.1".into(),
+                    ..handshake("app")
+                },
+                HandshakeRejectionReason::ProtocolMismatch,
+            ),
+            (handshake("bad id"), HandshakeRejectionReason::InvalidAppId),
+            (
+                Handshake {
+                    requested_mode: RequestedMode::Unsupported("shared".into()),
+                    ..handshake("app")
+                },
+                HandshakeRejectionReason::UnsupportedMode,
+            ),
+        ];
+        for (request, expected) in cases {
+            broker
+                .send(BrokerCommand::Handshake {
+                    client_id: id,
+                    handshake: request,
+                })
+                .await
+                .unwrap();
+            assert!(
+                matches!(&*receiver.recv().await.unwrap(), ServerMessage::HandshakeResponse(HandshakeResponse::Rejected { reason, .. }) if *reason == expected)
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_releases_held_state_and_pauses_until_reacquired() {
+        let capture = CaptureControl::default();
+        let broker = spawn(vec![mapping("a", "switch_1")], capture.clone());
+        let (id, mut receiver) = register(&broker, 16).await;
+        receiver.recv().await.unwrap();
+        broker
+            .send(BrokerCommand::Handshake {
+                client_id: id,
+                handshake: handshake("app"),
+            })
+            .await
+            .unwrap();
+        receiver.recv().await.unwrap();
+        broker
+            .send(BrokerCommand::Input(PhysicalEvent {
+                mapping_id: "a".into(),
+                action: Action::Pressed,
+            }))
+            .await
+            .unwrap();
+        receiver.recv().await.unwrap();
+        tokio::time::advance(Duration::from_millis(1_600)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(&*receiver.recv().await.unwrap(), ServerMessage::SwitchEvent(e) if e.action == Action::Released)
+        );
+        assert!(matches!(
+            &*receiver.recv().await.unwrap(),
+            ServerMessage::SessionRevoked(SessionRevoked {
+                reason: SessionRevocationReason::HeartbeatTimeout,
+                ..
+            })
+        ));
+        assert!(!capture.enabled());
+
+        let (_, mut snapshot) = register(&broker, 4).await;
+        assert!(
+            matches!(&*snapshot.recv().await.unwrap(), ServerMessage::Hello(Hello { switches, .. }) if switches[0].state == SwitchState::Released)
+        );
+        broker
+            .send(BrokerCommand::Input(PhysicalEvent {
+                mapping_id: "a".into(),
+                action: Action::Released,
+            }))
+            .await
+            .unwrap();
+        broker
+            .send(BrokerCommand::Handshake {
+                client_id: id,
+                handshake: handshake("app"),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            &*receiver.recv().await.unwrap(),
+            ServerMessage::HandshakeResponse(HandshakeResponse::Accepted { .. })
+        ));
+        assert!(capture.enabled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn matching_session_heartbeat_extends_the_lease() {
+        let broker = spawn(vec![mapping("a", "switch_1")], CaptureControl::default());
+        let (id, mut receiver) = register(&broker, 8).await;
+        receiver.recv().await.unwrap();
+        broker
+            .send(BrokerCommand::Handshake {
+                client_id: id,
+                handshake: handshake("app"),
+            })
+            .await
+            .unwrap();
+        let session_id = match &*receiver.recv().await.unwrap() {
+            ServerMessage::HandshakeResponse(HandshakeResponse::Accepted {
+                session_id, ..
+            }) => session_id.clone(),
+            _ => panic!("expected acceptance"),
+        };
+        tokio::time::advance(Duration::from_millis(1_000)).await;
+        broker
+            .send(BrokerCommand::Heartbeat {
+                client_id: id,
+                session_id,
+            })
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(1_000)).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn reacquisition_failure_has_typed_rejection() {
+        let capture = CaptureControl::default();
+        let broker = spawn(vec![mapping("a", "switch_1")], capture.clone());
+        let (id, mut receiver) = register(&broker, 8).await;
+        receiver.recv().await.unwrap();
+        broker
+            .send(BrokerCommand::Handshake {
+                client_id: id,
+                handshake: handshake("app"),
+            })
+            .await
+            .unwrap();
+        receiver.recv().await.unwrap();
+        broker
+            .send(BrokerCommand::RevokeSession {
+                reason: SessionRevocationReason::ExplicitRevocation,
+            })
+            .await
+            .unwrap();
+        receiver.recv().await.unwrap();
+        capture.fail_resume_for_test(true);
+        broker
+            .send(BrokerCommand::Handshake {
+                client_id: id,
+                handshake: handshake("app"),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            &*receiver.recv().await.unwrap(),
+            ServerMessage::HandshakeResponse(HandshakeResponse::Rejected {
+                reason: HandshakeRejectionReason::CaptureUnavailable,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_queue_overflow_revokes_and_pauses_capture() {
+        let capture = CaptureControl::default();
+        let broker = spawn(vec![mapping("a", "switch_1")], capture.clone());
+        let (id, mut receiver) = register(&broker, 1).await;
+        receiver.recv().await.unwrap();
+        broker
+            .send(BrokerCommand::Handshake {
+                client_id: id,
+                handshake: handshake("app"),
+            })
+            .await
+            .unwrap();
+        // Leave acceptance queued, then overflow it with input.
         broker
             .send(BrokerCommand::Input(PhysicalEvent {
                 mapping_id: "a".into(),
@@ -273,6 +632,26 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(receiver.try_recv().is_ok());
         tokio::task::yield_now().await;
+        assert!(!capture.enabled());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(TryRecvError::Disconnected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn passive_queue_overflow_disconnects_the_slow_client() {
+        let broker = spawn(vec![mapping("a", "switch_1")], CaptureControl::default());
+        let (_, mut receiver) = register(&broker, 1).await;
+        broker
+            .send(BrokerCommand::Input(PhysicalEvent {
+                mapping_id: "a".into(),
+                action: Action::Pressed,
+            }))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(receiver.try_recv().is_ok());
         assert!(matches!(
             receiver.try_recv(),
             Err(TryRecvError::Disconnected)
@@ -281,11 +660,10 @@ mod tests {
 
     #[tokio::test]
     async fn in_process_delivery_p95_is_below_twenty_milliseconds() {
-        let broker = spawn(vec![mapping("a", "switch_1")]);
+        let broker = spawn(vec![mapping("a", "switch_1")], CaptureControl::default());
         let (_, mut receiver) = register(&broker, 8).await;
         receiver.recv().await.unwrap();
         let mut samples = Vec::new();
-
         for index in 0..100 {
             let action = if index % 2 == 0 {
                 Action::Pressed
@@ -303,9 +681,11 @@ mod tests {
             receiver.recv().await.unwrap();
             samples.push(started.elapsed());
         }
-
         samples.sort_unstable();
-        let p95 = samples[94];
-        assert!(p95 < std::time::Duration::from_millis(20), "p95={p95:?}");
+        assert!(
+            samples[94] < Duration::from_millis(20),
+            "p95={:?}",
+            samples[94]
+        );
     }
 }
