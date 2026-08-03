@@ -5,7 +5,6 @@ pub const PROTOCOL_VERSION: &str = "0.3.0";
 /// Validate a confidence value: must be finite and in `[0.0, 100.0]`.
 /// Returns `Some(value)` if valid, `None` if the value is invalid (NaN, Inf,
 /// or out of range). Used at deserialization boundaries.
-#[allow(dead_code)]
 pub fn validate_confidence(value: f32) -> Option<f32> {
     if value.is_finite() && (0.0..=100.0).contains(&value) {
         Some(value)

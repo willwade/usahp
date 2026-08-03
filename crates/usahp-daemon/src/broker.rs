@@ -158,7 +158,6 @@ async fn run(
                         });
                     if let Some(switch_id) = escape_switch {
                         tracing::warn!(%switch_id, "escape hatch triggered — sustained hold exceeded {}ms", ESCAPE_HOLD_MS);
-                        runtime.escape_tracker.clear();
                         runtime.revoke(SessionRevocationReason::EscapeHatch).await;
                     }
                 }
@@ -198,9 +197,12 @@ impl Runtime {
         if self.paused || !self.capture.enabled() {
             return;
         }
+        // Validate confidence at the boundary: reject NaN/Inf/out-of-range,
+        // treating invalid values as None (unknown).
+        let confidence = event.confidence.and_then(usahp_core::validate_confidence);
         match self
             .state
-            .apply(&event.mapping_id, event.action, event.confidence)
+            .apply(&event.mapping_id, event.action, confidence)
         {
             Ok(Some(transition)) => {
                 // Escape-hatch tracking: record logical press timestamps so

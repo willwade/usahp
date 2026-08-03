@@ -17,6 +17,12 @@ unsafe extern "C" {
     fn objc_getClass(name: *const u8) -> Id;
     fn sel_registerName(name: *const u8) -> Id;
     fn objc_msgSend(obj: Id, sel: Id) -> Id;
+    /// Separate declaration for calls returning an int (e.g. processIdentifier).
+    /// Using objc_msgSend with a pointer return type for an int return is
+    /// technically UB even though it works on current Apple hardware.
+    #[link_name = "objc_msgSend"]
+    #[allow(clashing_extern_declarations)]
+    fn objc_msgSend_int(obj: Id, sel: Id) -> i32;
 }
 
 const NSWORKSPACE: &[u8] = b"NSWorkspace\0";
@@ -41,7 +47,7 @@ fn frontmost_pid() -> Option<u32> {
             return None;
         }
         let sel_pid = sel_registerName(PROCESS_IDENTIFIER.as_ptr());
-        let pid = objc_msgSend(app, sel_pid) as i32;
+        let pid = objc_msgSend_int(app, sel_pid);
         if pid > 0 { Some(pid as u32) } else { None }
     }
 }

@@ -192,7 +192,7 @@ Uses [boost::beast](https://www.boost.org/doc/libs/release/libs/beast/) for WebS
 #include <iostream>
 
 namespace beast = boost::beast;
-namespace websocket = beast::websockets;
+namespace websocket = beast::websocket;
 namespace net = boost::asio;
 using tcp = net::ip::tcp;
 using json = nlohmann::json;
@@ -240,7 +240,8 @@ async fn main() {
         if let Ok(parsed) = serde_json::from_str::<usahp_core::ServerMessage>(&text) {
             match parsed {
                 usahp_core::ServerMessage::SwitchEvent(ev) => {
-                    println!("{} {:?} ({:.1}%)", ev.switch_id, ev.action, ev.confidence);
+                    let conf = ev.confidence.map(|c| format!("{c:.1}%")).unwrap_or_else(|| "—".into());
+                    println!("{} {:?} ({conf})", ev.switch_id, ev.action);
                 }
                 _ => {}
             }
@@ -266,9 +267,9 @@ Clients that need exclusive switch control send a handshake after `hello`. The b
 // After hello:
 socket.send(JSON.stringify({
   type: 'handshake',
-  protocol_version: '0.2',
+  protocol_version: '0.3.0',
   app_id: 'org.example.switch-app',
-  requested_mode: 'EXCLUSIVE_FOREGROUND',
+  requested_mode: 'exclusive_foreground',
   pid: process.pid  // optional, enables focus-driven revocation
 }));
 
