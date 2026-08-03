@@ -1,14 +1,24 @@
+#[cfg(not(target_os = "macos"))]
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(not(target_os = "macos"))]
+use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result, bail};
-use rdev::{Event, EventType, Key};
+use rdev::Key;
+#[cfg(not(target_os = "macos"))]
+use rdev::{Event, EventType};
 use tokio::sync::mpsc;
+#[cfg(not(target_os = "macos"))]
 use tracing::{error, info};
-use usahp_core::{Action, InputKind, Mapping};
+#[cfg(not(target_os = "macos"))]
+use usahp_core::Action;
+use usahp_core::{InputKind, Mapping};
 
-use crate::broker::{BrokerCommand, PhysicalEvent};
+use crate::broker::BrokerCommand;
+#[cfg(not(target_os = "macos"))]
+use crate::broker::PhysicalEvent;
 
 pub fn validate(mappings: &[Mapping]) -> Result<()> {
     for mapping in mappings {
@@ -47,52 +57,63 @@ fn spawn_keyboard(
     broker: mpsc::Sender<BrokerCommand>,
     capture: Arc<AtomicBool>,
 ) -> Result<()> {
-    let mut by_key: HashMap<Key, Vec<String>> = HashMap::new();
-    for mapping in mappings {
-        by_key
-            .entry(parse_key(&mapping.code)?)
-            .or_default()
-            .push(mapping.id);
+    #[cfg(target_os = "macos")]
+    {
+        // rdev::grab crashes on macOS (TSM off-main-thread → SIGTRAP). Use a
+        // native CGEventTap that reads only keycodes — no TextServices.
+        crate::macos_keyboard::spawn(&mappings, broker, capture);
+        Ok(())
     }
-    std::thread::Builder::new()
-        .name("usahp-keyboard-grab".into())
-        .spawn(move || {
-            info!("keyboard suppression backend started");
-            let callback = move |event: Event| -> Option<Event> {
-                // Capture released: pass the event through to the OS untouched.
-                if !capture.load(Ordering::Relaxed) {
-                    return Some(event);
-                }
-                let edge = match &event.event_type {
-                    EventType::KeyPress(key) => Some((*key, Action::Pressed)),
-                    EventType::KeyRelease(key) => Some((*key, Action::Released)),
-                    _ => None,
-                };
-                let Some((key, action)) = edge else {
-                    return Some(event);
-                };
-                let Some(mapping_ids) = by_key.get(&key) else {
-                    return Some(event);
-                };
-                for mapping_id in mapping_ids {
-                    if broker
-                        .blocking_send(BrokerCommand::Input(PhysicalEvent {
-                            mapping_id: mapping_id.clone(),
-                            action,
-                        }))
-                        .is_err()
-                    {
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut by_key: HashMap<Key, Vec<String>> = HashMap::new();
+        for mapping in mappings {
+            by_key
+                .entry(parse_key(&mapping.code)?)
+                .or_default()
+                .push(mapping.id);
+        }
+        std::thread::Builder::new()
+            .name("usahp-keyboard-grab".into())
+            .spawn(move || {
+                info!("keyboard suppression backend started");
+                let callback = move |event: Event| -> Option<Event> {
+                    // Capture released: pass the event through to the OS untouched.
+                    if !capture.load(Ordering::Relaxed) {
                         return Some(event);
                     }
+                    let edge = match &event.event_type {
+                        EventType::KeyPress(key) => Some((*key, Action::Pressed)),
+                        EventType::KeyRelease(key) => Some((*key, Action::Released)),
+                        _ => None,
+                    };
+                    let Some((key, action)) = edge else {
+                        return Some(event);
+                    };
+                    let Some(mapping_ids) = by_key.get(&key) else {
+                        return Some(event);
+                    };
+                    for mapping_id in mapping_ids {
+                        if broker
+                            .blocking_send(BrokerCommand::Input(PhysicalEvent {
+                                mapping_id: mapping_id.clone(),
+                                action,
+                            }))
+                            .is_err()
+                        {
+                            return Some(event);
+                        }
+                    }
+                    None
+                };
+                if let Err(error) = rdev::grab(callback) {
+                    error!(?error, "keyboard grab failed; check platform permissions");
                 }
-                None
-            };
-            if let Err(error) = rdev::grab(callback) {
-                error!(?error, "keyboard grab failed; check platform permissions");
-            }
-        })
-        .context("could not start keyboard suppression thread")?;
-    Ok(())
+            })
+            .context("could not start keyboard suppression thread")?;
+        Ok(())
+    }
 }
 
 fn parse_key(code: &str) -> Result<Key> {
