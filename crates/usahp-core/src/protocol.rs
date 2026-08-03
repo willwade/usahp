@@ -62,8 +62,9 @@ pub struct SwitchEvent {
     pub action: Action,
     /// Analog activation confidence in `[0.0, 100.0]`.
     ///
-    /// - `None` (field absent on the wire): the source is binary or confidence
-    ///   is unknown. This is the default for keyboard and gamepad inputs.
+    /// - `None` (field absent on the wire): the source does not report
+    ///   confidence. No current hardware path produces this — keyboard,
+    ///   gamepad, and simulator inputs always set `Some`.
     /// - `Some(100.0)`: binary switch pressed — maximum confidence.
     /// - `Some(0.0)`: binary switch released, or analog source reporting
     ///   genuine zero. This is **distinct from `None`**: the source actively

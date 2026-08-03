@@ -112,7 +112,7 @@ impl SwitchStateMachine {
                     LogicalTransition {
                         switch_id: switch_id.clone(),
                         action: Action::Released,
-                        confidence: None,
+                        confidence: Some(0.0),
                     }
                 })
             })
