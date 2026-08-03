@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
 use rdev::{Event, EventType, Key};
@@ -23,20 +25,28 @@ pub fn validate(mappings: &[Mapping]) -> Result<()> {
     Ok(())
 }
 
-pub fn spawn(mappings: &[Mapping], broker: mpsc::Sender<BrokerCommand>) -> Result<()> {
+pub fn spawn(
+    mappings: &[Mapping],
+    broker: mpsc::Sender<BrokerCommand>,
+    capture: Arc<AtomicBool>,
+) -> Result<()> {
     let keyboard: Vec<_> = mappings
         .iter()
         .filter(|mapping| mapping.input == InputKind::Keyboard)
         .cloned()
         .collect();
     if !keyboard.is_empty() {
-        spawn_keyboard(keyboard, broker.clone())?;
+        spawn_keyboard(keyboard, broker.clone(), capture.clone())?;
     }
-    spawn_gamepads(mappings, broker)?;
+    spawn_gamepads(mappings, broker, capture)?;
     Ok(())
 }
 
-fn spawn_keyboard(mappings: Vec<Mapping>, broker: mpsc::Sender<BrokerCommand>) -> Result<()> {
+fn spawn_keyboard(
+    mappings: Vec<Mapping>,
+    broker: mpsc::Sender<BrokerCommand>,
+    capture: Arc<AtomicBool>,
+) -> Result<()> {
     let mut by_key: HashMap<Key, Vec<String>> = HashMap::new();
     for mapping in mappings {
         by_key
@@ -49,6 +59,10 @@ fn spawn_keyboard(mappings: Vec<Mapping>, broker: mpsc::Sender<BrokerCommand>) -
         .spawn(move || {
             info!("keyboard suppression backend started");
             let callback = move |event: Event| -> Option<Event> {
+                // Capture released: pass the event through to the OS untouched.
+                if !capture.load(Ordering::Relaxed) {
+                    return Some(event);
+                }
                 let edge = match &event.event_type {
                     EventType::KeyPress(key) => Some((*key, Action::Pressed)),
                     EventType::KeyRelease(key) => Some((*key, Action::Released)),
@@ -132,7 +146,11 @@ fn validate_gamepad(mapping: &Mapping) -> Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn spawn_gamepads(_: &[Mapping], _: mpsc::Sender<BrokerCommand>) -> Result<()> {
+fn spawn_gamepads(
+    _: &[Mapping],
+    _: mpsc::Sender<BrokerCommand>,
+    _capture: Arc<AtomicBool>,
+) -> Result<()> {
     Ok(())
 }
 
@@ -154,7 +172,11 @@ fn validate_gamepad(mapping: &Mapping) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn spawn_gamepads(mappings: &[Mapping], broker: mpsc::Sender<BrokerCommand>) -> Result<()> {
+fn spawn_gamepads(
+    mappings: &[Mapping],
+    broker: mpsc::Sender<BrokerCommand>,
+    capture: Arc<AtomicBool>,
+) -> Result<()> {
     use evdev::{Device, EventType};
 
     let mut by_device: HashMap<String, HashMap<u16, Vec<String>>> = HashMap::new();
@@ -169,6 +191,7 @@ fn spawn_gamepads(mappings: &[Mapping], broker: mpsc::Sender<BrokerCommand>) -> 
 
     for (path, codes) in by_device {
         let broker = broker.clone();
+        let capture = capture.clone();
         let error_path = path.clone();
         std::thread::Builder::new()
             .name(format!("usahp-evdev-{path}"))
@@ -194,6 +217,12 @@ fn spawn_gamepads(mappings: &[Mapping], broker: mpsc::Sender<BrokerCommand>) -> 
                         }
                     };
                     for event in events {
+                        // Capture released: skip routing. NOTE the device stays
+                        // exclusively grabbed, so other apps still don't see these
+                        // events — full release would need device.ungrab().
+                        if !capture.load(Ordering::Relaxed) {
+                            continue;
+                        }
                         if event.event_type() != EventType::KEY {
                             continue;
                         }
