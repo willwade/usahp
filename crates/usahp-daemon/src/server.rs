@@ -137,6 +137,7 @@ mod tests {
             .send(BrokerCommand::Input(PhysicalEvent {
                 mapping_id: "physical".into(),
                 action: Action::Pressed,
+                confidence: Some(100.0),
             }))
             .await
             .unwrap();

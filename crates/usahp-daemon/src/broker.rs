@@ -17,10 +17,11 @@ use crate::input::CaptureControl;
 pub const HEARTBEAT_INTERVAL_MS: u32 = 500;
 pub const MISSED_HEARTBEAT_LIMIT: u32 = 3;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PhysicalEvent {
     pub mapping_id: String,
     pub action: Action,
+    pub confidence: Option<f32>,
 }
 
 #[derive(Debug)]
@@ -168,9 +169,16 @@ impl Runtime {
         if self.paused || !self.capture.enabled() {
             return;
         }
-        match self.state.apply(&event.mapping_id, event.action) {
+        match self
+            .state
+            .apply(&event.mapping_id, event.action, event.confidence)
+        {
             Ok(Some(transition)) => {
-                let message = self.event(transition.switch_id, transition.action);
+                let message = self.event(
+                    transition.switch_id,
+                    transition.action,
+                    transition.confidence,
+                );
                 if let Some(client_id) = self.session.as_ref().map(|session| session.client_id) {
                     let failed = self
                         .clients
@@ -302,11 +310,22 @@ impl Runtime {
         self.state
             .release_all()
             .into_iter()
-            .map(|transition| self.event(transition.switch_id, transition.action))
+            .map(|transition| {
+                self.event(
+                    transition.switch_id,
+                    transition.action,
+                    transition.confidence,
+                )
+            })
             .collect()
     }
 
-    fn event(&mut self, switch_id: String, action: Action) -> Arc<ServerMessage> {
+    fn event(
+        &mut self,
+        switch_id: String,
+        action: Action,
+        confidence: Option<f32>,
+    ) -> Arc<ServerMessage> {
         self.sequence += 1;
         Arc::new(ServerMessage::SwitchEvent(SwitchEvent {
             protocol_version: PROTOCOL_VERSION.into(),
@@ -314,11 +333,7 @@ impl Runtime {
             monotonic_us: self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
             switch_id,
             action,
-            confidence: if action == Action::Pressed {
-                100.0
-            } else {
-                0.0
-            },
+            confidence,
         }))
     }
 
@@ -405,6 +420,7 @@ mod tests {
             .send(BrokerCommand::Input(PhysicalEvent {
                 mapping_id: "a".into(),
                 action: Action::Pressed,
+                confidence: Some(100.0),
             }))
             .await
             .unwrap();
@@ -456,6 +472,7 @@ mod tests {
             .send(BrokerCommand::Input(PhysicalEvent {
                 mapping_id: "a".into(),
                 action: Action::Pressed,
+                confidence: Some(100.0),
             }))
             .await
             .unwrap();
@@ -521,6 +538,7 @@ mod tests {
             .send(BrokerCommand::Input(PhysicalEvent {
                 mapping_id: "a".into(),
                 action: Action::Pressed,
+                confidence: Some(100.0),
             }))
             .await
             .unwrap();
@@ -547,6 +565,7 @@ mod tests {
             .send(BrokerCommand::Input(PhysicalEvent {
                 mapping_id: "a".into(),
                 action: Action::Released,
+                confidence: Some(0.0),
             }))
             .await
             .unwrap();
@@ -652,6 +671,7 @@ mod tests {
             .send(BrokerCommand::Input(PhysicalEvent {
                 mapping_id: "a".into(),
                 action: Action::Pressed,
+                confidence: Some(100.0),
             }))
             .await
             .unwrap();
@@ -673,6 +693,7 @@ mod tests {
             .send(BrokerCommand::Input(PhysicalEvent {
                 mapping_id: "a".into(),
                 action: Action::Pressed,
+                confidence: Some(100.0),
             }))
             .await
             .unwrap();
@@ -701,6 +722,11 @@ mod tests {
                 .send(BrokerCommand::Input(PhysicalEvent {
                     mapping_id: "a".into(),
                     action,
+                    confidence: Some(if action == Action::Pressed {
+                        100.0
+                    } else {
+                        0.0
+                    }),
                 }))
                 .await
                 .unwrap();
