@@ -293,6 +293,9 @@ impl Runtime {
             return;
         }
         self.paused = false;
+        // Clear any stale press timestamps from passive/broadcast mode so the
+        // escape-hatch clock starts fresh with the new session.
+        self.escape_tracker.clear();
         let session_id = Uuid::new_v4().to_string();
         self.session = Some(Session {
             client_id,
@@ -1023,6 +1026,75 @@ mod tests {
         assert!(
             !revoked,
             "session should NOT be revoked if switch was released in time"
+        );
+    }
+
+    #[tokio::test]
+    async fn escape_hatch_tracker_cleared_on_new_session() {
+        let broker = spawn(vec![mapping("a", "switch_1")], CaptureControl::default());
+        let (client_id, mut rx) = register(&broker, 8).await;
+        rx.recv().await.unwrap(); // hello
+
+        // Press switch while in passive/broadcast mode (no session).
+        broker
+            .send(BrokerCommand::Input(PhysicalEvent {
+                mapping_id: "a".into(),
+                action: Action::Pressed,
+                confidence: Some(100.0),
+            }))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        rx.try_recv().ok(); // consume broadcast switch_event
+
+        // Wait long enough that the stale timestamp would trip the escape hatch
+        // if it were still in the tracker.
+        tokio::time::sleep(Duration::from_millis(ESCAPE_HOLD_MS + 200)).await;
+
+        // Now establish a session. The broker will broadcast release messages
+        // for held switches before sending the HandshakeResponse.
+        broker
+            .send(BrokerCommand::Handshake {
+                client_id,
+                handshake: handshake("com.test.app"),
+            })
+            .await
+            .unwrap();
+
+        // Drain pre-session release broadcasts, then find Accepted.
+        let mut session_id = None;
+        for _ in 0..10 {
+            let msg = rx.recv().await.unwrap();
+            if let ServerMessage::HandshakeResponse(HandshakeResponse::Accepted {
+                session_id: sid, ..
+            }) = &*msg
+            {
+                session_id = Some(sid.clone());
+                break;
+            }
+        }
+        let session_id = session_id.expect("expected ACCEPTED");
+
+        // Keep the session alive with heartbeats and verify no immediate
+        // EscapeHatch revocation arrives.
+        for _ in 0..5 {
+            broker
+                .send(BrokerCommand::Heartbeat {
+                    client_id,
+                    session_id: session_id.clone(),
+                })
+                .await
+                .ok();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        let revoked = matches!(
+            rx.try_recv(),
+            Ok(msg) if matches!(&*msg, ServerMessage::SessionRevoked(rev) if rev.reason == SessionRevocationReason::EscapeHatch)
+        );
+        assert!(
+            !revoked,
+            "stale escape_tracker entry from passive mode should not fire on new session"
         );
     }
 }
