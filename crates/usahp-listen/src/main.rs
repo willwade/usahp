@@ -48,8 +48,8 @@ async fn main() -> Result<()> {
                 }
             }
             ServerMessage::SwitchEvent(event) => println!(
-                "#{:<6} +{:>10}us  {} {:?}",
-                event.sequence, event.monotonic_us, event.switch_id, event.action
+                "#{:<6} +{:>10}us  {} {:?}  {:.1}%",
+                event.sequence, event.monotonic_us, event.switch_id, event.action, event.confidence
             ),
         }
     }
