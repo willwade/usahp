@@ -34,7 +34,7 @@ export default defineConfig({
     },
     nav: [
       { text: 'Guide', link: '/quick-start' },
-      { text: 'Specification', link: '/spec' },
+      { text: 'Draft specification', link: '/spec' },
       { text: 'Protocol 0.1', link: '/protocol-v0' },
       { text: 'GitHub', link: repository }
     ],
@@ -57,10 +57,10 @@ export default defineConfig({
         ]
       },
       {
-        text: 'Specification',
+        text: 'Future specification',
         items: [
           { text: 'RFC (Draft)', link: '/spec' },
-          { text: 'Plain English', link: '/plain-english' }
+          { text: 'Draft in plain English', link: '/plain-english' }
         ]
       },
       {

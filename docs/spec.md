@@ -1,15 +1,19 @@
-# **RFC: Universal Switch Access Handoff Protocol (USAHP)**
+# Draft: Universal Switch Access Handoff Protocol (USAHP)
 
-**Status:** Draft / Request for Comments **Category:** Accessibility Standards / Inter-Process Communication
+**Status:** Request for comments · **Category:** Proposed accessibility standard and IPC design
+
+::: danger Aspirational draft
+This document describes a possible future standard. It is not the implemented USAHP contract and must not be used as evidence of current safety, operating-system integration, or platform support. See [protocol 0.1](/protocol-v0) for what the broker implements today.
+:::
 
 ## **Abstract**
 
-This document defines a standardized protocol for the negotiation and handoff of accessibility switch hardware between an Operating System (OS) and a foreground client application. It establishes a two-part standard: a hardware-agnostic HID profile that introduces an analog "confidence score," and an IPC state machine that ensures seamless control transfer without trapping the user in unresponsive UI states.
+This document proposes a protocol for negotiating and handing accessibility switch hardware between an operating system and a foreground client application. It explores a hardware-agnostic input profile and an IPC state machine intended to support recoverable control transfer. Those guarantees require platform integration that the current broker does not provide.
 
 ## **1\. Introduction and Motivation**
 
 Historically, switch integration has relied on input devices like keyboard emulation or remapping software. This creates a critical user experience failure when users transition between OS-level navigation (e.g., Apple Switch Control, Windows Native Access) and internal application scanning (e.g., Grid 3, custom web apps). Without a unified API, the OS and the client application frequently conflict over input streams.  
-The Universal Switch Access Handoff Protocol (USAHP) resolves this by defining a strict, standardized handshake allowing the foreground application to temporarily claim raw switch inputs while the OS monitors failsafe triggers to guarantee user recovery.
+The proposed Universal Switch Access Handoff Protocol (USAHP) would address this with a standardized handshake that lets a foreground application request raw switch input while an OS-level service monitors recovery triggers.
 
 ## **2\. Terminology**
 
@@ -22,11 +26,11 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 ### **3.1 Part 1: The HID Profile (Hardware)**
 
-To eliminate hardware fragmentation, the OS-SD MUST normalize all physical and virtual switch inputs into a standardized profile containing:
+An implementation of this future standard would normalize physical and virtual switch inputs into a profile containing:
 
 > * **Switch ID:** A normalized string (e.g., switch\_1, switch\_2).  
 > * **Action Event:** A discrete payload representing a specific state change in the event lifecycle: pressed (leading edge), released (trailing edge), or held (sustained input). The OS-SD MUST NOT group these into a single click; they MUST be emitted as separate events (See Section 6.3).  
-> * **Confidence Score:** A float value between 0.0 and 100.0. Physical binary switches default to 100.0. Non-traditional inputs (BCI, facial gestures, voice triggers) MAY send analog confidence scores, allowing the Client App to apply internal prediction thresholding.
+> * **Confidence Score:** A provisional analog value. The final units, range, absence semantics, sampling model, and snapshot representation remain open in [issue #6](https://github.com/OwenMcGirr/usahp/issues/6). Physical binary switches currently emit interim values of 100.0 and 0.0.
 
 ### **3.2 Part 2: The Handoff Protocol (Software)**
 
@@ -47,7 +51,7 @@ The OS-SD MUST strictly manage switch routing through the following four states:
 
 ## **5\. Safety Mechanisms (The Triggers)**
 
-Clinical safety mandates that a user MUST NEVER be trapped inside an application. The standard enforces two non-negotiable failsafes:
+The target design requires recovery mechanisms so a user is not left without switch access. These mechanisms are not implemented or clinically validated in the current broker.
 
 ### **5.1 Trigger A: The Escape Hatch (User-Initiated)**
 
@@ -61,26 +65,29 @@ While in STATE\_APP\_CONTROL, the Client App MUST send an acknowledgment ping (a
 
 ### **6.1 The Handshake Manifest**
 
-When gaining focus, the Client App MUST submit a SwitchControlManifest to request input routing.  
-{  
-  "app\_id": "com.smartbox.grid3",  
-  "protocol\_version": "1.0.0",  
-  "requested\_mode": "exclusive\_foreground",  
-  "requested\_inputs": \[  
-    {  
-      "switch\_id": "switch\_1",  
-      "intended\_action": "step"  
-    }  
-  \],  
-  "capabilities": {  
-    "supports\_confidence\_score": true,  
-    "handles\_hold\_events": false  
-  },  
-  "failsafe\_contract": {  
-    "heartbeat\_interval\_ms": 500,  
-    "missed\_heartbeat\_limit": 3  
-  }  
+When gaining focus, the Client App would submit a SwitchControlManifest to request input routing:
+
+```json
+{
+  "app_id": "com.smartbox.grid3",
+  "protocol_version": "1.0.0",
+  "requested_mode": "exclusive_foreground",
+  "requested_inputs": [
+    {
+      "switch_id": "switch_1",
+      "intended_action": "step"
+    }
+  ],
+  "capabilities": {
+    "supports_confidence_score": true,
+    "handles_hold_events": false
+  },
+  "failsafe_contract": {
+    "heartbeat_interval_ms": 500,
+    "missed_heartbeat_limit": 3
+  }
 }
+```
 
 ### **6.2 The OS Response**
 
@@ -88,20 +95,22 @@ The OS-SD evaluates the manifest and returns a SwitchControlResponse.
 
 #### **6.2.1 Successful Acceptance**
 
-{  
-  "session\_id": "sess\_9f83a710-4b2e-43a1",  
-  "status": "ACCEPTED",  
-  "negotiated\_config": {  
-    "heartbeat\_interval\_ms": 500,  
-    "confidence\_mode\_active": true,  
-    "assigned\_switches": \["switch\_1"\],  
-    "system\_escape\_trigger": "sustained\_hold\_4000ms"  
-  },  
-  "endpoints": {  
-    "heartbeat": "ipc:///tmp/switch\_daemon\_hb.sock",  
-    "event\_stream": "ipc:///tmp/switch\_daemon\_events.sock"  
-  }  
+```json
+{
+  "session_id": "sess_9f83a710-4b2e-43a1",
+  "status": "ACCEPTED",
+  "negotiated_config": {
+    "heartbeat_interval_ms": 500,
+    "confidence_mode_active": true,
+    "assigned_switches": ["switch_1"],
+    "system_escape_trigger": "sustained_hold_4000ms"
+  },
+  "endpoints": {
+    "heartbeat": "ipc:///tmp/switch_daemon_hb.sock",
+    "event_stream": "ipc:///tmp/switch_daemon_events.sock"
+  }
 }
+```
 
 #### **6.2.2 Rejection Handling**
 
@@ -128,7 +137,7 @@ To support this, the OS-SD MUST NOT send a single consolidated "click" event. In
 ### **6.4 Analog Inputs and Confidence Scores**
 
 Traditional physical switches are binary. However, modern AAC relies heavily on Machine Learning (ML) systems, facial gesture recognition (e.g., Apple ARKit face tracking), and Brain-Computer Interfaces (BCI). These inputs are not binary; they operate on probability.  
-The confidence field (float, 0.0 to 100.0) exists to bridge this gap without creating separate APIs for physical and virtual switches.
+The draft reserves space for confidence so physical and virtual switches do not require unrelated APIs. The final representation is deliberately unresolved; [issue #6](https://github.com/OwenMcGirr/usahp/issues/6) owns that design.
 
 #### **6.4.1 Physical Switches (Binary)**
 
@@ -160,7 +169,7 @@ To support both standard foreground applications and background "Computer Contro
 > * **primary\_controller (Focus-Agnostic):** The Client App receives exclusive global access to the switches, regardless of whether it is in the foreground or background (e.g., Grid 3 or VoiceGarden driving the OS). This tier supersedes foreground applications.  
 > * **passive\_observer:** The Client App receives a read-only copy of switch events globally, regardless of focus. The app CANNOT consume, block, or alter the event routing. Multiple apps MAY hold this status simultaneously.
 
-> **v0 Implementation Note:** The v0 broker implements `exclusive_foreground` via a runtime capture flag — when the foreground app loses window focus, the broker pauses key capture (keys pass through to the OS / Switch Control); when focus returns, capture resumes. This is a software approximation of the full handoff state machine (§4); true OS-level arbitration (§6.5.2–6.5.4) is future work.
+> **Current implementation note:** The v0 broker exposes a low-level capture flag to embedded hosts. It does not detect focus, implement an `exclusive_foreground` session, provide system arbitration, or guarantee recovery. Those are future protocol and platform tasks.
 
 #### **6.5.2 The System Arbitration UI (Conflict Resolution)**
 
@@ -193,8 +202,6 @@ To prevent catastrophic UI conflicts, the OS-SD MUST enforce strict Mutex rules 
 
 > * **Foreground:** Mutex is naturally handled by the OS window manager. Only one app can hold window focus at a time.  
 > * **Primary Controller:** Mutex is handled explicitly by the System Arbitration UI (Section 6.5.2). If a new app requests control, the user MUST approve the handoff, ensuring two apps never hold primary\_controller status simultaneously.
-
-## 
 
 ## **7\. Addendum: Android OS Implementation**
 

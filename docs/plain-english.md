@@ -1,114 +1,83 @@
-# USAHP in Plain English
+# The USAHP draft in plain English
 
-A plain-language companion to the [USAHP specification](USAHP-RFC.md). This document explains the protocol without the formal RFC language. If you build software that uses switches, or if you help switch users, this document tells you what USAHP does and why it matters.
+This is a plain-language companion to the [draft USAHP handoff specification](/spec). It explains a possible future standard. It is not a description of everything the current USAHP broker can do.
 
----
+::: warning Draft, not a current guarantee
+The implemented contract is [protocol 0.1](/protocol-v0). Features such as operating-system handoff, arbitration, escape hatches, and continuous confidence are proposed future work.
+:::
 
-## The Problem
+## The problem
 
-Switch users face a problem when they move between the operating system and an application.
+Switch users can face a conflict when they move between operating-system scanning and an application with its own scanning interface. Both systems may try to read the same switch, causing duplicate or missing actions.
 
-For example, a user scans the macOS dock with Apple Switch Control. Then they open a scanning app. The app also wants the switch signal. But the operating system and the app both try to read the same switch at the same time. The result is confusion. Keys fire twice, or not at all.
+The draft USAHP standard explores a common way to hand control between those systems without forcing every application to understand every type of switch hardware.
 
-This problem exists on every platform. Windows, macOS, Linux, iOS, and Android all have system-level switch scanning. AAC apps have their own scanning. There is no standard way to hand control from one to the other.
+## The proposed target
 
-USAHP solves this problem.
+The target design has four conceptual states:
 
----
+1. **OS routing.** The operating system owns switch navigation.
+2. **Handshake.** An application asks for switch control and the system accepts or rejects it.
+3. **App control.** An accepted application receives switch events while the system monitors safety conditions.
+4. **Recovery.** The system revokes application control after a failure and returns to OS routing.
 
-## What USAHP Does
+These states are a design goal. The current daemon is not an operating-system service and cannot provide full system routing or recovery.
 
-USAHP is a protocol that hands switch control between the operating system and an application.
+## Proposed safety mechanisms
 
-When a switch-aware app comes to the foreground, the app tells the system that it wants the switches. The system stops its own scanning and sends the raw switch events to the app. When the app is done, or when the user switches away, the system takes control again.
+The draft explores two complementary mechanisms:
 
-The user never gets stuck. The protocol has built-in safety mechanisms. If the app freezes or crashes, the system takes back control immediately.
+- **Escape hatch:** a user-controlled hardware pattern that an OS-level service would intercept before an application.
+- **Heartbeat:** a session client periodically proves it is responsive; missed heartbeats cause revocation.
 
----
+The escape hatch and system-level recovery are not implemented. A heartbeat-backed local session is planned for protocol 0.2, but it must not be described as clinical lockout protection.
 
-## The Four States
+## Proposed application roles
 
-USAHP uses four states to manage who gets the switches.
+The future design considers three roles:
 
-1. **OS routing (default).** The operating system scans. The app gets no switch events. This is what Apple Switch Control and Windows Eye Control do today.
+- **Exclusive foreground:** a focused application temporarily receives switch input.
+- **Primary controller:** an approved background controller receives global input.
+- **Passive observer:** an application receives a read-only copy.
 
-2. **Handshake.** A switch-aware app comes to the foreground. The app sends a request to the system. The system checks the request and accepts or rejects it.
+Only one local exclusive session is planned for the next broker version. Focus detection, primary controllers, passive subscriptions, arbitration UI, and operating-system enforcement remain future work.
 
-3. **App control.** The system stops scanning. It sends the raw switch events to the app. The app does its own scanning. The system watches for safety triggers at the same time.
+## Confidence
 
-4. **Recovery.** If the app crashes or stops responding, the system takes back control instantly. The user is never trapped inside the app.
+The current wire format carries `100.0` for a binary press and `0.0` for a release. It does not yet carry continuous analog samples from BCI, facial-gesture, pressure, or similar sources.
 
----
+The final confidence model is intentionally open. Its units, range, unknown state, sampling, snapshots, and protocol version will be designed in [issue #6](https://github.com/OwenMcGirr/usahp/issues/6). Applications will continue to own threshold and activation policy.
 
-## Confidence Scores
+## Platform ideas
 
-Most switches are binary. The switch is pressed, or it is released. For these switches, the confidence score is always 100.0 (pressed) or 0.0 (released).
+The draft discusses possible platform-specific implementations:
 
-But modern switch inputs are not binary. A brain-computer interface sends a probability. A facial-gesture tracker sends a confidence level. A pressure sensor sends a continuous value.
+- Desktop systems could use a privileged local service.
+- Android could use an `AccessibilityService` and bound-service IPC.
+- iOS would require operating-system support or an external hardware bridge.
 
-USAHP carries this analog data in a `confidence` field. The field is a float from 0.0 to 100.0. Binary switches send 100.0 or 0.0. Analog sources send the raw probability.
+These are proposals, not shipped USAHP components or commitments from platform vendors.
 
-The app decides what counts as a press. For example, the app can set a threshold at 85.0. Below 85.0, nothing happens. Above 85.0, the app treats it as a switch press. This lets apps do predictive scanning from noisy inputs.
+## What exists today
 
----
+The implemented Rust broker currently:
 
-## Safety
+- captures and suppresses configured keyboard input on Windows, macOS, and Linux;
+- supports exclusively grabbed evdev switch or gamepad devices on Linux;
+- aggregates physical inputs into logical `pressed` and `released` edges;
+- broadcasts versioned JSON events on `ws://127.0.0.1:7312`;
+- provides a simulator and reference listener;
+- carries interim binary confidence values;
+- exposes a low-level capture flag for embedded hosts.
 
-A switch user must never be trapped inside an application. USAHP enforces two safety mechanisms.
+It does not currently provide a handshake, heartbeat, OS scanning, focus detection, arbitration, escape hatch, remote access, or continuous confidence stream.
 
-**Escape hatch (user-initiated).** The user can trigger a hardware pattern (for example, hold a switch for four seconds). The system intercepts this pattern before the app sees it. The system revokes app control and shows a system-level overlay. The user is back in OS scanning.
-
-**Heartbeat (software-initiated).** While the app has control, it sends a regular ping to the system (every 500 ms by default). If the system misses three pings in a row, it assumes that the app is frozen. The system revokes control and returns to OS scanning.
-
----
-
-## Who Gets the Switches
-
-Multiple switch-aware apps can run at the same time. USAHP defines three tiers.
-
-**Exclusive foreground.** The app gets switches only when it has window focus. If the user clicks away, the app loses the switches. The switches go back to the operating system. This is the default tier for most apps.
-
-**Primary controller.** The app gets switches all the time, even when it is in the background. This tier is for "computer control" apps (for example, Grid 3 or VoiceGarden). Only one app can hold this tier at a time.
-
-**Passive observer.** The app gets a read-only copy of switch events. It cannot consume or block them. Multiple apps can hold this tier at the same time.
-
-When two apps ask for the same tier, the system shows a high-contrast arbitration overlay. The user uses standard OS scanning to choose which app gets control. If the user does not respond within a timeout (default 15 seconds), the system denies the new request and keeps the current app.
-
----
-
-## How It Works on Each Platform
-
-**macOS, Windows, Linux.** A background daemon captures switch hardware globally. It routes events to the foreground app over a local WebSocket. The daemon needs OS-level input permission (Accessibility on macOS, low-level hook approval on Windows, `input` group on Linux).
-
-**iOS and iPadOS.** Apple does not allow third-party background daemons. A software-only daemon is not possible. The solution is a small hardware bridge (a Bluetooth dongle). The dongle acts as both a HID keyboard (for Apple Switch Control) and a custom GATT service (for the app). The dongle does the handoff in firmware. If the app crashes, the Bluetooth link drops. The dongle reverts to HID keyboard mode. Apple Switch Control takes over.
-
-**Android.** Android's security model does not allow global input hooks from a standalone binary. The daemon runs as a registered AccessibilityService. Communication with the app uses Android's native AIDL bound services. When the app loses focus or crashes, Android severs the connection. The daemon detects this and returns to OS routing.
-
----
-
-## What Exists Today (v0)
-
-The v0 broker is built and working. It does the narrow event-broker layer:
-
-- It captures switch keys (keyboard on all platforms, gamepad on Linux).
-- It normalizes them to `pressed` and `released` edges.
-- It broadcasts those edges to every connected local app over WebSocket (`ws://127.0.0.1:7312`).
-- It supports a runtime capture flag. A host app can pause and resume capture (for example, when the window loses focus). This implements the `exclusive_foreground` tier.
-
-The v0 broker does **not** do the full handoff state machine. There is no OS-level arbitration, no multi-app conflict resolution, no heartbeat, and no escape hatch. Those are future work.
-
-A `confidence` field is on the wire (binary values only today). Streaming real analog confidence from capture through to the app is a follow-up.
-
----
-
-## For Developers
-
-If you build a switch-aware app:
+## For developers today
 
 1. Connect to `ws://127.0.0.1:7312`.
-2. Read the `hello` frame to learn which switches are configured.
-3. Listen for `switch_event` frames. Each frame has a `switch_id`, an `action` (`pressed` or `released`), and a `confidence` (0.0 to 100.0).
-4. Map the switch events to your app's internal actions (for example, `switch_1` = select, `switch_2` = step).
-5. You do not send anything back. The protocol is passive in v0. Your app receives events but never sends commands to the daemon.
+2. Read the `hello` snapshot.
+3. Listen for `switch_event` frames.
+4. Keep debounce, holds, thresholds, and activation policy in your application.
+5. Reconnect and replace local state from the next snapshot if the socket closes.
 
-If the daemon is not running, your app falls back to standard keyboard input. This is the expected behaviour. The daemon is an enhancement, not a requirement.
+Use the [implemented protocol reference](/protocol-v0) rather than this draft when building a current client.
